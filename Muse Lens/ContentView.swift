@@ -9,16 +9,18 @@ import SwiftUI
 
 struct ContentView: View {
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world12!")
-        }
-        .padding()
+        CameraCaptureView()
     }
 }
 
 #Preview {
-    ContentView()
+    // Use a simple preview that doesn't require camera access
+    VStack {
+        Text("MuseLens")
+            .font(.system(size: 36, weight: .bold))
+        Text("拍一眼，就懂艺术")
+            .font(.system(size: 18, weight: .medium))
+            .foregroundColor(.secondary)
+    }
+    .padding()
 }
