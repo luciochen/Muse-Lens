@@ -574,28 +574,24 @@ class TTSPlayback: NSObject, ObservableObject {
             print("🔄 Testing API connectivity...")
             result.connectionTestStarted = true
             
-            do {
-                let testResult = await testAPIConnection(apiKey: key)
-                result.connectionSuccessful = testResult.success
-                result.connectionError = testResult.error
-                result.httpStatusCode = testResult.statusCode
-                
-                if testResult.success {
-                    print("✅✅✅ API connection test PASSED!")
-                    print("✅ HTTP Status: \(testResult.statusCode ?? 0)")
-                    print("✅ OpenAI TTS API is accessible and working")
-                } else {
-                    print("❌ API connection test FAILED")
-                    if let statusCode = testResult.statusCode {
-                        print("❌ HTTP Status: \(statusCode)")
-                    }
-                    if let error = testResult.error {
-                        print("❌ Error: \(error)")
-                    }
+            // testAPIConnection doesn't throw, so no do-catch needed
+            let testResult = await testAPIConnection(apiKey: key)
+            result.connectionSuccessful = testResult.success
+            result.connectionError = testResult.error
+            result.httpStatusCode = testResult.statusCode
+            
+            if testResult.success {
+                print("✅✅✅ API connection test PASSED!")
+                print("✅ HTTP Status: \(testResult.statusCode ?? 0)")
+                print("✅ OpenAI TTS API is accessible and working")
+            } else {
+                print("❌ API connection test FAILED")
+                if let statusCode = testResult.statusCode {
+                    print("❌ HTTP Status: \(statusCode)")
                 }
-            } catch {
-                result.connectionError = error.localizedDescription
-                print("❌ Connection test error: \(error.localizedDescription)")
+                if let error = testResult.error {
+                    print("❌ Error: \(error)")
+                }
             }
         } else {
             result.hasKey = false
@@ -652,7 +648,7 @@ class TTSPlayback: NSObject, ObservableObject {
             if (200...299).contains(statusCode) {
                 // Success - read a few bytes to confirm it's audio data
                 var byteCount = 0
-                for try await byte in asyncBytes {
+                for try await _ in asyncBytes {
                     byteCount += 1
                     if byteCount >= 100 { // Just check first 100 bytes
                         break
@@ -1325,7 +1321,7 @@ class TTSPlayback: NSObject, ObservableObject {
     
     /// Pause playback
     func pause() {
-        if let player = player {
+        if let player = self.player {
             pausedTime = currentTime // Save current position
             player.pause()
             isPlaying = false
@@ -1350,7 +1346,7 @@ class TTSPlayback: NSObject, ObservableObject {
     /// Stop playback
     func stop() {
         // Stop AVPlayer
-        if let player = player {
+        if let player = self.player {
             player.pause()
             if let timeObserver = timeObserver {
                 player.removeTimeObserver(timeObserver)

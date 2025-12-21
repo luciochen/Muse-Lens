@@ -105,6 +105,7 @@ struct CameraCaptureView: View {
     @State private var artistIntroduction: String?
     @State private var confidence: Double?
     @State private var showHistory = false
+    @State private var showDatabaseTest = false
     @State private var lastCapturedImage: UIImage? // Store image for retry
     @State private var searchText = ""
     @State private var showSearchResults = false
@@ -170,16 +171,44 @@ struct CameraCaptureView: View {
                 // .padding(.horizontal)
                 // .padding(.top, 8)
                 
-                // History Button
+                // Database Test Button (Development)
+                #if DEBUG
                 Button(action: {
-                    showHistory = true
+                    showDatabaseTest = true
                 }) {
-                    HStack {
-                        Image(systemName: "clock.arrow.circlepath")
-                        Text("历史记录")
+                    Image(systemName: "checkmark.shield.fill")
+                        .font(.system(size: 24))
+                        .foregroundColor(.blue)
+                        .padding()
+                }
+                #endif
+                
+                HStack(spacing: 16) {
+                    // Database Test Button (Development only)
+                    #if DEBUG
+                    Button(action: {
+                        showDatabaseTest = true
+                    }) {
+                        HStack {
+                            Image(systemName: "checkmark.shield.fill")
+                            Text("数据库测试")
+                        }
+                        .font(.system(size: 16))
+                        .foregroundColor(.green)
                     }
-                    .font(.system(size: 16))
-                    .foregroundColor(.blue)
+                    #endif
+                    
+                    // History Button
+                    Button(action: {
+                        showHistory = true
+                    }) {
+                        HStack {
+                            Image(systemName: "clock.arrow.circlepath")
+                            Text("历史记录")
+                        }
+                        .font(.system(size: 16))
+                        .foregroundColor(.blue)
+                    }
                 }
                 .padding(.top, 8)
                 
@@ -276,6 +305,9 @@ struct CameraCaptureView: View {
         }
         .sheet(isPresented: $showHistory) {
             HistoryView()
+        }
+        .sheet(isPresented: $showDatabaseTest) {
+            DatabaseTestView()
         }
         // Search results sheet - temporarily disabled
         // .sheet(isPresented: $showSearchResults) {
@@ -505,53 +537,158 @@ struct CameraCaptureView: View {
                     print("✅ Showing playback view with skeleton loading")
                 }
                 
-                // Start generating narration in background
-                print("🤖 Sending image to ChatGPT for analysis and narration generation...")
                 let narrationStartTime = Date()
+                var narrationResponse: NarrationResponse? = nil
                 
-                // Generate narration with confidence assessment
-                var narrationResponse = try await NarrationService.shared.generateNarrationFromImage(
-                    imageBase64: imageBase64
-                )
+                // STEP 1: Quick identification to get basic artwork info
+                print("🔍 Step 1: Quick identification to get basic artwork info...")
+                var quickId: (title: String, artist: String, year: String?)? = nil
+                do {
+                    quickId = try await NarrationService.shared.quickIdentifyArtwork(imageBase64: imageBase64)
+                    print("📝 Quick identification result: '\(quickId!.title)' by '\(quickId!.artist)'")
+                } catch {
+                    print("⚠️ Quick identification failed: \(error), will proceed with full generation")
+                }
                 
-                // Validate narration is not empty
-                guard !narrationResponse.narration.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                // STEP 2: Check database for artwork and artist (if identification succeeded)
+                if let id = quickId, id.title != "无法识别" && id.artist != "未知艺术家" {
+                    print("🔍 Step 2: Checking database for artwork and artist...")
+                    
+                    // Generate identifier and check backend cache
+                    let identifier = ArtworkIdentifier.generate(
+                        title: id.title,
+                        artist: id.artist,
+                        year: id.year
+                    )
+                    
+                    // Check if backend has cached narration for this artwork
+                    if BackendAPIService.shared.isConfigured {
+                        do {
+                            // Check artwork in database
+                            if let backendArtwork = try await BackendAPIService.shared.findArtwork(identifier: identifier) {
+                                print("✅ Found artwork in database: '\(backendArtwork.title)' by '\(backendArtwork.artist)'")
+                                print("📝 Using cached narration from database, skipping generation (saving time and API costs)")
+                                
+                                // Increment view count asynchronously (non-blocking)
+                                if let artworkId = backendArtwork.id {
+                                    Task {
+                                        await BackendAPIService.shared.incrementViewCount(artworkId: artworkId)
+                                    }
+                                }
+                                
+                                // Check artist introduction in database
+                                var cachedIntroduction: String? = nil
+                                let artistName = backendArtwork.artist
+                                if !artistName.isEmpty && artistName != "未知艺术家" {
+                                    print("🔍 Checking database for artist introduction: \(artistName)")
+                                    if let backendArtist = try? await BackendAPIService.shared.findArtistIntroduction(artist: artistName) {
+                                        if let artistIntro = backendArtist.artistIntroduction, !artistIntro.isEmpty {
+                                            cachedIntroduction = artistIntro
+                                            print("✅ Found artist introduction in database: \(artistIntro.count) characters")
+                                        } else {
+                                            print("⚠️ Artist found in database but biography is empty")
+                                        }
+                                    } else {
+                                        print("ℹ️ Artist not found in database, will use artwork's introduction if available")
+                                    }
+                                }
+                                
+                                // Create narration response from backend cache
+                                // Use artist introduction from artists table (cachedIntroduction)
+                                narrationResponse = backendArtwork.toNarrationResponse(artistIntroduction: cachedIntroduction)
+                                
+                                if let dbIntroduction = cachedIntroduction, !dbIntroduction.isEmpty {
+                                    print("✅ Using artist introduction from artists table: \(dbIntroduction.count) characters")
+                                } else {
+                                    print("⚠️ No artist introduction available in artists table")
+                                }
+                                
+                                print("✅ Using cached data from database (user's photo will be preserved)")
+                            } else {
+                                print("ℹ️ Artwork not found in database, will generate narration")
+                            }
+                        } catch {
+                            // Network errors are handled internally and return nil
+                            // Continue with full generation if backend check fails
+                            if case BackendAPIError.networkError = error {
+                                print("⚠️ Network error checking database, continuing with full generation")
+                            } else {
+                                print("⚠️ Database check failed: \(error), continuing with full generation")
+                            }
+                        }
+                    } else {
+                        print("⚠️ Backend not configured, skipping database check")
+                    }
+                } else {
+                    print("⚠️ Quick identification uncertain or failed, skipping database check, will generate narration")
+                }
+                
+                // STEP 3: If no cached data found in database, generate full narration
+                if narrationResponse == nil {
+                    print("🤖 Step 3: No cached data found in database, generating full narration...")
+                    print("🤖 Sending image to ChatGPT for full analysis and narration generation...")
+                    
+                    // Generate narration with confidence assessment
+                    let generatedNarrationResponse = try await NarrationService.shared.generateNarrationFromImage(
+                        imageBase64: imageBase64
+                    )
+                    
+                    // Validate narration is not empty
+                    guard !generatedNarrationResponse.narration.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw NarrationService.NarrationError.invalidResponse
+                    }
+                    
+                    print("📊 Recognition confidence: \(generatedNarrationResponse.confidence) (\(generatedNarrationResponse.confidenceLevel))")
+                    print("📝 AI-generated info - Title: '\(generatedNarrationResponse.title)', Artist: '\(generatedNarrationResponse.artist)', Year: '\(generatedNarrationResponse.year ?? "null")', Style: '\(generatedNarrationResponse.style ?? "null")'")
+                    
+                    // Use cache service to get artwork narration (may save to backend)
+                    narrationResponse = await ArtworkCacheService.shared.getArtworkWithArtistIntroduction(
+                        title: generatedNarrationResponse.title,
+                        artist: generatedNarrationResponse.artist,
+                        year: generatedNarrationResponse.year,
+                        narrationResponse: generatedNarrationResponse,
+                        artworkInfo: nil // Will be set after verification
+                    ) ?? generatedNarrationResponse
+                }
+                
+                guard var finalNarrationResponse = narrationResponse else {
                     throw NarrationService.NarrationError.invalidResponse
                 }
                 
-                print("📊 Recognition confidence: \(narrationResponse.confidence) (\(narrationResponse.confidenceLevel))")
-                print("📝 AI-generated info - Title: '\(narrationResponse.title)', Artist: '\(narrationResponse.artist)', Year: '\(narrationResponse.year ?? "null")', Style: '\(narrationResponse.style ?? "null")'")
+                print("📝 Final narration - Title: '\(finalNarrationResponse.title)', Artist: '\(finalNarrationResponse.artist)'")
+                
+                // Variable to store verified info for later use
+                var verifiedInfo: ArtworkInfo? = nil
                 
                 // For high confidence, ALWAYS verify information from online sources
-                if narrationResponse.confidenceLevel == .high {
+                if finalNarrationResponse.confidenceLevel == .high {
                     print("🔍 High confidence detected, verifying information from online sources...")
                     
                     // Try multiple search strategies with the AI-generated information
                     var searchCandidates: [RecognitionCandidate] = []
                     
-                    // Strategy 1: Use AI-generated title and artist
+                    // Strategy 1: Use artwork title and artist
                     searchCandidates.append(RecognitionCandidate(
-                        artworkName: narrationResponse.title,
-                        artist: narrationResponse.artist != "未知艺术家" ? narrationResponse.artist : nil,
-                        confidence: narrationResponse.confidence
+                        artworkName: finalNarrationResponse.title,
+                        artist: finalNarrationResponse.artist != "未知艺术家" ? finalNarrationResponse.artist : nil,
+                        confidence: finalNarrationResponse.confidence
                     ))
                     
                     // Strategy 2: Try with artist name variations (if available)
-                    let artist = narrationResponse.artist
+                    let artist = finalNarrationResponse.artist
                     if artist != "未知艺术家" && !artist.isEmpty {
                         // Try English name if Chinese name was provided
                         if artist.contains("·") || artist.contains("达") {
                             // Might be Chinese name, try searching with just artwork name first
                             searchCandidates.append(RecognitionCandidate(
-                                artworkName: narrationResponse.title,
+                                artworkName: finalNarrationResponse.title,
                                 artist: nil,
-                                confidence: narrationResponse.confidence
+                                confidence: finalNarrationResponse.confidence
                             ))
                         }
                     }
                     
                     // Try to retrieve verified information
-                    var verifiedInfo: ArtworkInfo? = nil
                     for candidate in searchCandidates {
                         if let info = await RetrievalService.shared.retrieveArtworkInfo(candidates: [candidate]) {
                             verifiedInfo = info
@@ -565,37 +702,40 @@ struct CameraCaptureView: View {
                     if let verified = verifiedInfo {
                         print("✅ Found verified information from online sources")
                         print("📝 Verified info - Title: '\(verified.title)', Artist: '\(verified.artist)', Year: '\(verified.year ?? "null")', Style: '\(verified.style ?? "null")'")
-                        print("📝 AI info - Title: '\(narrationResponse.title)', Artist: '\(narrationResponse.artist)', Year: '\(narrationResponse.year ?? "null")', Style: '\(narrationResponse.style ?? "null")'")
+                        print("📝 Artwork info - Title: '\(finalNarrationResponse.title)', Artist: '\(finalNarrationResponse.artist)', Year: '\(finalNarrationResponse.year ?? "null")', Style: '\(finalNarrationResponse.style ?? "null")'")
                         
-                        // PRIORITY: Use AI-generated info (from narration) as primary source
-                        // Only supplement with verified info if AI info is missing
+                        // PRIORITY: Use artwork info (from narration) as primary source
+                        // Only supplement with verified info if artwork info is missing
                         // Convert verified info to Chinese if needed
-                        let finalTitle = narrationResponse.title.isEmpty || narrationResponse.title == "无法识别的作品" ? verified.title : narrationResponse.title
-                        let finalArtist = narrationResponse.artist.isEmpty || narrationResponse.artist == "未知艺术家" ? verified.artist : narrationResponse.artist
-                        let finalYear = narrationResponse.year ?? verified.year
-                        let finalStyle = narrationResponse.style ?? verified.style
+                        var finalTitle = finalNarrationResponse.title.isEmpty || finalNarrationResponse.title == "无法识别的作品" ? verified.title : finalNarrationResponse.title
+                        // Clean title: remove 《》 characters
+                        finalTitle = ArtworkIdentifier.cleanTitle(finalTitle)
+                        
+                        let finalArtist = finalNarrationResponse.artist.isEmpty || finalNarrationResponse.artist == "未知艺术家" ? verified.artist : finalNarrationResponse.artist
+                        let finalYear = finalNarrationResponse.year ?? verified.year
+                        let finalStyle = finalNarrationResponse.style ?? verified.style
                         
                         // Merge sources
-                        var allSources = narrationResponse.sources
+                        var allSources = finalNarrationResponse.sources
                         for source in verified.sources {
                             if !allSources.contains(source) {
                                 allSources.append(source)
                             }
                         }
                         
-                        narrationResponse = NarrationResponse(
-                            title: finalTitle, // Prioritize AI title (from narration)
-                            artist: finalArtist, // Prioritize AI artist (from narration)
-                            year: finalYear, // Use AI year if available, else verified
-                            style: finalStyle, // Use AI style if available, else verified
-                            summary: narrationResponse.summary, // Keep AI summary
-                            narration: narrationResponse.narration, // Keep AI-generated narration (most accurate)
-                            artistIntroduction: narrationResponse.artistIntroduction, // Keep AI-generated artist intro
+                        finalNarrationResponse = NarrationResponse(
+                            title: finalTitle, // Prioritize artwork title (from narration), cleaned
+                            artist: finalArtist, // Prioritize artwork artist (from narration)
+                            year: finalYear, // Use artwork year if available, else verified
+                            style: finalStyle, // Use artwork style if available, else verified
+                            summary: finalNarrationResponse.summary, // Keep artwork summary
+                            narration: finalNarrationResponse.narration, // Keep artwork narration (most accurate)
+                            artistIntroduction: finalNarrationResponse.artistIntroduction, // Keep artwork artist intro
                             sources: allSources, // Merge sources
-                            confidence: narrationResponse.confidence // Keep AI confidence
+                            confidence: finalNarrationResponse.confidence // Keep artwork confidence
                         )
-                        print("✅ Using AI-generated info (from narration) as primary source")
-                        print("✅ Final info - Title: '\(narrationResponse.title)', Artist: '\(narrationResponse.artist)', Year: '\(narrationResponse.year ?? "null")', Style: '\(narrationResponse.style ?? "null")'")
+                        print("✅ Using artwork info (from narration) as primary source")
+                        print("✅ Final info - Title: '\(finalNarrationResponse.title)', Artist: '\(finalNarrationResponse.artist)', Year: '\(finalNarrationResponse.year ?? "null")', Style: '\(finalNarrationResponse.style ?? "null")'")
                     } else {
                         print("⚠️ Could not verify information from online sources")
                         print("✅ Using AI-generated information (from narration) as primary source")
@@ -604,60 +744,129 @@ struct CameraCaptureView: View {
                     }
                 } else {
                     // For medium/low confidence, still try to verify if possible
-                    if narrationResponse.title != "无法识别的作品" && !narrationResponse.title.contains("印象派") && !narrationResponse.title.contains("风格") {
+                    if finalNarrationResponse.title != "无法识别的作品" && !finalNarrationResponse.title.contains("印象派") && !finalNarrationResponse.title.contains("风格") {
                         print("🔍 Medium/low confidence, attempting verification...")
                         let candidate = RecognitionCandidate(
-                            artworkName: narrationResponse.title,
-                            artist: narrationResponse.artist != "未知艺术家" ? narrationResponse.artist : nil,
-                            confidence: narrationResponse.confidence
+                            artworkName: finalNarrationResponse.title,
+                            artist: finalNarrationResponse.artist != "未知艺术家" ? finalNarrationResponse.artist : nil,
+                            confidence: finalNarrationResponse.confidence
                         )
                         
                         if let verified = await RetrievalService.shared.retrieveArtworkInfo(candidates: [candidate]) {
+                            verifiedInfo = verified
                             print("✅ Found verified information, updating...")
-                            narrationResponse = NarrationResponse(
+                            finalNarrationResponse = NarrationResponse(
                                 title: verified.title,
                                 artist: verified.artist,
-                                year: verified.year ?? narrationResponse.year,
-                                style: verified.style ?? narrationResponse.style,
-                                summary: narrationResponse.summary,
-                                narration: narrationResponse.narration,
-                                artistIntroduction: narrationResponse.artistIntroduction,
+                                year: verified.year ?? finalNarrationResponse.year,
+                                style: verified.style ?? finalNarrationResponse.style,
+                                summary: finalNarrationResponse.summary,
+                                narration: finalNarrationResponse.narration,
+                                artistIntroduction: finalNarrationResponse.artistIntroduction,
                                 sources: verified.sources,
-                                confidence: min(narrationResponse.confidence + 0.1, 1.0) // Slightly increase confidence if verified
+                                confidence: min(finalNarrationResponse.confidence + 0.1, 1.0) // Slightly increase confidence if verified
                             )
                         }
                     }
                 }
                 
+                // After verification, create final artwork info
+                // CRITICAL: imageURL should ONLY be from museum API (reference image), NEVER user's photo
+                // - verifiedInfo?.imageURL: Reference image from museum API (Met Museum, Art Institute, etc.)
+                // - User's photo is stored separately in capturedImage and passed to PlaybackView as userImage
+                // - Backend stores only museum reference images, NOT user photos
+                // - PlaybackView always prioritizes userImage over artworkInfo.imageURL
+                let finalArtworkInfo = finalNarrationResponse.toArtworkInfo(
+                    imageURL: verifiedInfo?.imageURL, // Only museum API reference image, NOT user photo
+                    recognized: finalNarrationResponse.confidenceLevel == .high
+                )
+                print("📸 User photo preserved in capturedImage (will be displayed in PlaybackView)")
+                print("📸 Backend reference image (if available): \(verifiedInfo?.imageURL ?? "none")")
+                
+                // Save to backend cache with final verified information (only if not already cached)
+                // Backend stores only reference image from museum API, NOT user's photo
+                // CRITICAL: This method will fetch artist introduction from database if available
+                if finalNarrationResponse.confidenceLevel == .high {
+                    // Get cached narration (includes artist introduction from database if available)
+                    // This method checks database first for artist introduction
+                    let cachedNarration = await ArtworkCacheService.shared.getArtworkWithArtistIntroduction(
+                        title: finalNarrationResponse.title,
+                        artist: finalNarrationResponse.artist,
+                        year: finalNarrationResponse.year,
+                        narrationResponse: finalNarrationResponse,
+                        artworkInfo: finalArtworkInfo // Contains only museum API reference image, NOT user photo
+                    ) ?? finalNarrationResponse
+                    
+                    // CRITICAL: Always prefer cached narration if it has artist introduction from database
+                    // This ensures we use database artist introduction instead of regenerating
+                    let cachedHasIntro = cachedNarration.artistIntroduction != nil && 
+                                        !cachedNarration.artistIntroduction!.isEmpty
+                    let providedHasIntro = finalNarrationResponse.artistIntroduction != nil &&
+                                          !finalNarrationResponse.artistIntroduction!.isEmpty
+                    let introsDiffer = cachedNarration.artistIntroduction != finalNarrationResponse.artistIntroduction
+                    
+                    // Priority: Use cached if it has database introduction (even if same as provided)
+                    if cachedHasIntro {
+                        if introsDiffer {
+                            print("✅ Using artist introduction from database (different from AI-generated)")
+                            print("📝 Database: \(cachedNarration.artistIntroduction?.count ?? 0) chars")
+                            print("📝 AI-generated: \(finalNarrationResponse.artistIntroduction?.count ?? 0) chars")
+                        } else {
+                            print("ℹ️ Using cached narration (artist introduction matches)")
+                        }
+                        finalNarrationResponse = cachedNarration
+                    } else if cachedNarration.narration != finalNarrationResponse.narration {
+                        print("✅ Using cached narration from backend (narration differs)")
+                        finalNarrationResponse = cachedNarration
+                    } else if providedHasIntro {
+                        print("ℹ️ Using newly generated narration with AI artist introduction")
+                        // Keep finalNarrationResponse as is (has AI-generated introduction)
+                    } else {
+                        print("ℹ️ Using newly generated narration (no artist introduction available)")
+                    }
+                    print("📸 User's photo will still be displayed (not backend reference image)")
+                }
+                
+                // User's photo is already stored in capturedImage state variable
+                // It will be passed to PlaybackView and always displayed (not overwritten by backend imageURL)
+                // Backend only stores museum API reference image, NOT user's photo
+                
                 let elapsed = Date().timeIntervalSince(narrationStartTime)
-                print("✅ Narration generated successfully in \(String(format: "%.2f", elapsed))s")
-                print("📝 Title: \(narrationResponse.title)")
-                print("📝 Artist: \(narrationResponse.artist)")
-                print("📝 Confidence: \(narrationResponse.confidence) - \(narrationResponse.confidenceLevel)")
-                print("📝 Narration length: \(narrationResponse.narration.count) characters")
+                print("✅ Narration process completed in \(String(format: "%.2f", elapsed))s")
+                print("📝 Title: \(finalNarrationResponse.title)")
+                print("📝 Artist: \(finalNarrationResponse.artist)")
+                print("📝 Confidence: \(finalNarrationResponse.confidence) - \(finalNarrationResponse.confidenceLevel)")
+                print("📝 Narration length: \(finalNarrationResponse.narration.count) characters")
                 
-                // Determine recognized status based on confidence
-                let isRecognized = narrationResponse.confidenceLevel == .high
-                
-                // Save to history
-                let finalArtworkInfo = narrationResponse.toArtworkInfo(recognized: isRecognized)
+                // Save to history (include artist introduction and confidence)
+                // User's photo is saved in history, NOT in backend
                 let historyItem = HistoryItem(
                     artworkInfo: finalArtworkInfo,
-                    narration: narrationResponse.narration,
+                    narration: finalNarrationResponse.narration,
+                    artistIntroduction: finalNarrationResponse.artistIntroduction,
+                    confidence: finalNarrationResponse.confidence,
                     userPhotoData: image.jpegData(compressionQuality: 0.5)
                 )
                 HistoryService.shared.saveHistoryItem(historyItem)
+                print("✅ History item saved: \(finalNarrationResponse.title) by \(finalNarrationResponse.artist)")
                 
                 // Update playback view with final data
                 let totalElapsed = Date().timeIntervalSince(totalStartTime)
                 print("⏱️ Total processing time: \(String(format: "%.2f", totalElapsed))s")
                 
                 await MainActor.run {
+                    // Update playback view with final data
+                    // CRITICAL: User's photo (capturedImage) is preserved and will always be displayed
+                    // Backend imageURL is only a reference from museum API, NOT user's photo
+                    // PlaybackView prioritizes userImage over artworkInfo.imageURL
                     self.artworkInfo = finalArtworkInfo
-                    self.narration = narrationResponse.narration
-                    self.artistIntroduction = narrationResponse.artistIntroduction ?? ""
-                    self.confidence = narrationResponse.confidence
+                    self.narration = finalNarrationResponse.narration
+                    self.artistIntroduction = finalNarrationResponse.artistIntroduction ?? ""
+                    self.confidence = finalNarrationResponse.confidence
+                    // capturedImage is already set and preserved - it contains user's photo
+                    // It will be passed to PlaybackView as userImage parameter
                     print("✅ Updated playback view with final data")
+                    print("✅ User photo preserved (capturedImage will be displayed, not backend reference image)")
                 }
                 
             } catch {

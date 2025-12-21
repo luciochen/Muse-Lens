@@ -45,5 +45,56 @@ struct AppConfig {
     static func setAPIKey(_ key: String) {
         UserDefaults.standard.set(key, forKey: "OPENAI_API_KEY")
     }
+    
+    /// Backend API URL (Supabase or custom backend)
+    /// 
+    /// Set via environment variable BACKEND_API_URL or configure in Xcode Scheme:
+    /// Product → Scheme → Edit Scheme → Run → Arguments → Environment Variables
+    static var backendAPIURL: String? {
+        // Priority 1: Environment variable (recommended)
+        if let url = ProcessInfo.processInfo.environment["BACKEND_API_URL"], !url.isEmpty {
+            return url
+        }
+        
+        // Priority 2: UserDefaults (for development/testing only)
+        if let url = UserDefaults.standard.string(forKey: "BACKEND_API_URL"), !url.isEmpty {
+            return url
+        }
+        
+        return nil
+    }
+    
+    /// Backend API Key (Supabase anon key or custom API key)
+    /// 
+    /// Set via environment variable BACKEND_API_KEY or configure in Xcode Scheme:
+    /// Product → Scheme → Edit Scheme → Run → Arguments → Environment Variables
+    static var backendAPIKey: String? {
+        // Priority 1: Environment variable (recommended)
+        if let key = ProcessInfo.processInfo.environment["BACKEND_API_KEY"], !key.isEmpty {
+            return key
+        }
+        
+        // Priority 2: UserDefaults (for development/testing only)
+        if let key = UserDefaults.standard.string(forKey: "BACKEND_API_KEY"), !key.isEmpty {
+            return key
+        }
+        
+        return nil
+    }
+    
+    /// Check if backend API is configured
+    static var isBackendConfigured: Bool {
+        return backendAPIURL != nil && backendAPIKey != nil
+    }
+    
+    /// Set backend API URL (for development/testing only)
+    static func setBackendAPIURL(_ url: String) {
+        UserDefaults.standard.set(url, forKey: "BACKEND_API_URL")
+    }
+    
+    /// Set backend API key (for development/testing only)
+    static func setBackendAPIKey(_ key: String) {
+        UserDefaults.standard.set(key, forKey: "BACKEND_API_KEY")
+    }
 }
 

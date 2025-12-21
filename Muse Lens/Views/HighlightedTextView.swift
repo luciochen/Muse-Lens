@@ -81,7 +81,7 @@ struct HighlightedTextView: View {
         // Sentence endings: Chinese (。！？) and English (.!?)
         let sentenceEndings: [Character] = ["。", "！", "？", ".", "!", "?", ";", "\n"]
         
-        var chars = Array(fullText)
+        let chars = Array(fullText)
         var i = 0
         
         while i < chars.count {

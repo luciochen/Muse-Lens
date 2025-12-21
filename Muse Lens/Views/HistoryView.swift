@@ -11,10 +11,9 @@ import UIKit
 struct HistoryView: View {
     @State private var history: [HistoryItem] = []
     @State private var selectedItem: HistoryItem?
-    @State private var showPlayback = false
     
     var body: some View {
-        NavigationView {
+        NavigationStack {
             List {
                 if history.isEmpty {
                     VStack(spacing: 16) {
@@ -24,6 +23,10 @@ struct HistoryView: View {
                         Text("暂无历史记录")
                             .font(.system(size: 18))
                             .foregroundColor(.secondary)
+                        Text("识别作品后，记录会显示在这里")
+                            .font(.system(size: 14))
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 60)
@@ -33,11 +36,13 @@ struct HistoryView: View {
                         HistoryRow(item: item)
                             .onTapGesture {
                                 selectedItem = item
-                                showPlayback = true
                             }
+                            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                     }
+                    .onDelete(perform: deleteHistoryItems)
                 }
             }
+            .listStyle(.plain)
             .navigationTitle("历史记录")
             .toolbar {
                 if !history.isEmpty {
@@ -53,21 +58,38 @@ struct HistoryView: View {
         .onAppear {
             loadHistory()
         }
-        .fullScreenCover(isPresented: $showPlayback) {
-            if let item = selectedItem {
-                        PlaybackView(
-                            artworkInfo: item.artworkInfo,
-                            narration: item.narration,
-                            artistIntroduction: "", // History items don't have artist introduction
-                            userImage: item.userPhotoData.flatMap { UIImage(data: $0) },
-                            confidence: nil // History items don't have confidence data
-                        )
-            }
+        .fullScreenCover(item: $selectedItem) { item in
+            PlaybackView(
+                artworkInfo: item.artworkInfo,
+                narration: item.narration,
+                artistIntroduction: item.artistIntroduction ?? "",
+                userImage: item.userPhotoData.flatMap { UIImage(data: $0) },
+                confidence: item.confidence
+            )
         }
     }
     
     private func loadHistory() {
-        history = HistoryService.shared.loadHistory()
+        let loadedHistory = HistoryService.shared.loadHistory()
+        history = loadedHistory
+        print("📚 HistoryView: Loaded \(loadedHistory.count) items")
+        
+        // Debug: Print history items
+        for (index, item) in loadedHistory.enumerated() {
+            print("  \(index + 1). \(item.artworkInfo.title) by \(item.artworkInfo.artist) - \(item.timestamp)")
+        }
+    }
+    
+    private func deleteHistoryItems(at offsets: IndexSet) {
+        var updatedHistory = history
+        updatedHistory.remove(atOffsets: offsets)
+        
+        // Save updated history
+        if let encoded = try? JSONEncoder().encode(updatedHistory) {
+            UserDefaults.standard.set(encoded, forKey: "MuseLensHistory")
+            history = updatedHistory
+            print("✅ Deleted \(offsets.count) history item(s)")
+        }
     }
 }
 
@@ -83,7 +105,7 @@ struct HistoryRow: View {
                     .resizable()
                     .aspectRatio(contentMode: .fill)
                     .frame(width: 60, height: 60)
-                    .cornerRadius(8)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
             } else {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Color(.systemGray5))
@@ -105,14 +127,36 @@ struct HistoryRow: View {
                     .foregroundColor(.secondary)
                     .lineLimit(1)
                 
-                Text(item.timestamp, style: .relative)
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
+                HStack(spacing: 8) {
+                    // Confidence badge (if available)
+                    if let confidence = item.confidence {
+                        let level: RecognitionConfidenceLevel = confidence >= 0.8 ? .high : (confidence >= 0.5 ? .medium : .low)
+                        Text(level == .high ? "高确定性" : (level == .medium ? "中确定性" : "低确定性"))
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(level == .high ? .green : (level == .medium ? .orange : .red))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule()
+                                    .fill((level == .high ? Color.green : (level == .medium ? Color.orange : Color.red)).opacity(0.1))
+                            )
+                    }
+                    
+                    Text(item.timestamp, style: .relative)
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
             }
             
             Spacer()
+            
+            // Chevron
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
     }
 }
 

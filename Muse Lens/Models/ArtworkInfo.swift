@@ -100,13 +100,23 @@ struct HistoryItem: Codable, Identifiable {
     let id: UUID
     let artworkInfo: ArtworkInfo
     let narration: String
+    let artistIntroduction: String? // 艺术家介绍
+    let confidence: Double? // 识别置信度
     let timestamp: Date
     let userPhotoData: Data? // Compressed user photo
     
-    init(artworkInfo: ArtworkInfo, narration: String, userPhotoData: Data? = nil) {
+    init(
+        artworkInfo: ArtworkInfo,
+        narration: String,
+        artistIntroduction: String? = nil,
+        confidence: Double? = nil,
+        userPhotoData: Data? = nil
+    ) {
         self.id = UUID()
         self.artworkInfo = artworkInfo
         self.narration = narration
+        self.artistIntroduction = artistIntroduction
+        self.confidence = confidence
         self.timestamp = Date()
         self.userPhotoData = userPhotoData
     }

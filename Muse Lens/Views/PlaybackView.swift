@@ -24,8 +24,9 @@ struct PlaybackView: View {
     @Environment(\.dismiss) private var dismiss
     
     // Check if we're in loading state
+    // Only show loading when we truly have placeholder data
     private var isLoading: Bool {
-        narration.isEmpty || artworkInfo.title == "正在识别..." || artworkInfo.artist == "分析中"
+        artworkInfo.title == "正在识别..." && narration.isEmpty
     }
     
     // Get confidence level
@@ -112,8 +113,17 @@ struct PlaybackView: View {
     private var headerView: some View {
         VStack(spacing: 16) {
             // Artwork Image
+            // IMPORTANT: Always prioritize user's photo over backend reference image
+            // Backend imageURL is only a reference from museum API, not user's personal photo
             Group {
-                if let imageURL = artworkInfo.imageURL, let url = URL(string: imageURL) {
+                if let userImage = userImage {
+                    // Always use user's photo first (user's personal photo of the artwork)
+                    Image(uiImage: userImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } else if let imageURL = artworkInfo.imageURL, let url = URL(string: imageURL) {
+                    // Fallback to reference image from museum API (only if user photo not available)
+                    // This is a reference image, not user's photo
                     AsyncImage(url: url) { phase in
                         switch phase {
                         case .success(let image):
@@ -126,10 +136,6 @@ struct PlaybackView: View {
                             imagePlaceholder
                         }
                     }
-                } else if let userImage = userImage {
-                    Image(uiImage: userImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
                 } else {
                     imagePlaceholder
                 }
@@ -142,15 +148,17 @@ struct PlaybackView: View {
             // Artwork Info
             VStack(alignment: .leading, spacing: 12) {
                 if isLoading {
-                    // Skeleton loading
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.gray.opacity(0.2))
-                        .frame(height: 28)
-                        .shimmer()
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.gray.opacity(0.15))
-                        .frame(width: 200, height: 20)
-                        .shimmer()
+                    // Skeleton loading for header
+                    VStack(alignment: .leading, spacing: 8) {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.gray.opacity(0.2))
+                            .frame(height: 24)
+                            .shimmer()
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.gray.opacity(0.15))
+                            .frame(width: 180, height: 18)
+                            .shimmer()
+                    }
                 } else {
                     Text(artworkInfo.title)
                         .font(.system(size: 24, weight: .bold))
@@ -222,68 +230,86 @@ struct PlaybackView: View {
     private var artworkNarrationTab: some View {
         ScrollView {
             VStack(spacing: 24) {
-                // Show different content based on confidence level
-                if let level = confidenceLevel {
-                    switch level {
-                    case .high:
-                        // High confidence: Show full narration with audio controls
-                        audioControlsView(tts: artworkTTS, text: narration)
-                        narrationTextView(text: narration, isLoading: isLoading, tts: artworkTTS)
-                        
-                    case .medium:
-                        // Medium confidence: Show style description with disclaimer
-                        VStack(alignment: .leading, spacing: 12) {
-                            HStack {
-                                Image(systemName: "info.circle.fill")
-                                    .foregroundColor(.orange)
-                                Text("识别不确定")
-                                    .font(.system(size: 16, weight: .semibold))
-                                    .foregroundColor(.orange)
+                if isLoading {
+                    // Skeleton loading - show only when truly loading
+                    skeletonLoadingView()
+                        .padding()
+                } else if !narration.isEmpty {
+                    // Show actual content when available
+                    // Show different content based on confidence level
+                    if let level = confidenceLevel {
+                        switch level {
+                        case .high:
+                            // High confidence: Show full narration with audio controls
+                            audioControlsView(tts: artworkTTS, text: narration)
+                            narrationTextView(text: narration, isLoading: false, tts: artworkTTS)
+                            
+                        case .medium:
+                            // Medium confidence: Show style description with disclaimer
+                            VStack(alignment: .leading, spacing: 12) {
+                                HStack {
+                                    Image(systemName: "info.circle.fill")
+                                        .foregroundColor(.orange)
+                                    Text("识别不确定")
+                                        .font(.system(size: 16, weight: .semibold))
+                                        .foregroundColor(.orange)
+                                }
+                                .padding()
+                                .background(Color.orange.opacity(0.1))
+                                .cornerRadius(8)
+                                
+                                audioControlsView(tts: artworkTTS, text: narration)
+                                narrationTextView(text: narration, isLoading: false, tts: artworkTTS)
+                            }
+                            
+                        case .low:
+                            // Low confidence: Show friendly message
+                            VStack(spacing: 16) {
+                                Image(systemName: "questionmark.circle.fill")
+                                    .font(.system(size: 64))
+                                    .foregroundColor(.gray)
+                                
+                                Text("无法识别作品")
+                                    .font(.system(size: 20, weight: .bold))
+                                    .foregroundColor(.primary)
+                                
+                                Text(narration)
+                                    .font(.system(size: 16))
+                                    .foregroundColor(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .padding()
+                                    .background(Color(.systemGray6))
+                                    .cornerRadius(12)
+                                
+                                VStack(spacing: 8) {
+                                    Text("建议：")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(.secondary)
+                                    Text("• 尝试重新扫描作品")
+                                    Text("• 确保作品清晰可见")
+                                    Text("• 尝试扫描其他作品")
+                                }
+                                .font(.system(size: 14))
+                                .foregroundColor(.secondary)
                             }
                             .padding()
-                            .background(Color.orange.opacity(0.1))
-                            .cornerRadius(8)
-                            
-                            audioControlsView(tts: artworkTTS, text: narration)
-                            narrationTextView(text: narration, isLoading: isLoading, tts: artworkTTS)
                         }
-                        
-                    case .low:
-                        // Low confidence: Show friendly message
-                        VStack(spacing: 16) {
-                            Image(systemName: "questionmark.circle.fill")
-                                .font(.system(size: 64))
-                                .foregroundColor(.gray)
-                            
-                            Text("无法识别作品")
-                                .font(.system(size: 20, weight: .bold))
-                                .foregroundColor(.primary)
-                            
-                            Text(narration)
-                                .font(.system(size: 16))
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.center)
-                                .padding()
-                                .background(Color(.systemGray6))
-                                .cornerRadius(12)
-                            
-                            VStack(spacing: 8) {
-                                Text("建议：")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundColor(.secondary)
-                                Text("• 尝试重新扫描作品")
-                                Text("• 确保作品清晰可见")
-                                Text("• 尝试扫描其他作品")
-                            }
-                            .font(.system(size: 14))
-                            .foregroundColor(.secondary)
-                        }
-                        .padding()
+                    } else {
+                        // Default: Show narration
+                        audioControlsView(tts: artworkTTS, text: narration)
+                        narrationTextView(text: narration, isLoading: false, tts: artworkTTS)
                     }
                 } else {
-                    // Default: Show narration
-                    audioControlsView(tts: artworkTTS, text: narration)
-                    narrationTextView(text: narration, isLoading: isLoading, tts: artworkTTS)
+                    // Empty state - no content available
+                    VStack(spacing: 16) {
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 48))
+                            .foregroundColor(.secondary)
+                        Text("暂无内容")
+                            .font(.system(size: 16))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding()
                 }
             }
             .padding()
@@ -294,7 +320,12 @@ struct PlaybackView: View {
     private var artistIntroductionTab: some View {
         ScrollView {
             VStack(spacing: 24) {
-                if artistIntroduction.isEmpty {
+                if isLoading {
+                    // Show skeleton loading when loading
+                    skeletonLoadingView()
+                        .padding()
+                } else if artistIntroduction.isEmpty {
+                    // Empty state
                     VStack(spacing: 12) {
                         Image(systemName: "person.crop.circle.badge.questionmark")
                             .font(.system(size: 48))
@@ -319,21 +350,63 @@ struct PlaybackView: View {
         }
     }
     
+    // MARK: - Skeleton Loading View
+    private func skeletonLoadingView() -> some View {
+        VStack(alignment: .leading, spacing: 20) {
+            // Skeleton for audio controls
+            VStack(spacing: 16) {
+                // Progress bar skeleton
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.gray.opacity(0.15))
+                    .frame(height: 4)
+                    .shimmer()
+                
+                // Control buttons skeleton
+                HStack(spacing: 40) {
+                    Circle()
+                        .fill(Color.gray.opacity(0.15))
+                        .frame(width: 24, height: 24)
+                        .shimmer()
+                    Circle()
+                        .fill(Color.gray.opacity(0.15))
+                        .frame(width: 60, height: 60)
+                        .shimmer()
+                    Circle()
+                        .fill(Color.gray.opacity(0.15))
+                        .frame(width: 24, height: 24)
+                        .shimmer()
+                }
+                .frame(maxWidth: .infinity)
+                
+                // Toggle button skeleton
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.gray.opacity(0.1))
+                    .frame(width: 120, height: 36)
+                    .shimmer()
+            }
+            
+            // Skeleton for text content
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(0..<6, id: \.self) { index in
+                    HStack(spacing: 8) {
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.gray.opacity(0.15))
+                            .frame(height: 20)
+                            .frame(width: index % 3 == 0 ? 280 : (index % 3 == 1 ? 240 : 200))
+                            .shimmer()
+                        if index % 3 != 2 {
+                            Spacer()
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
     // MARK: - Narration Text View with Spotify-style Highlighting
     private func narrationTextView(text: String, isLoading: Bool, tts: TTSPlayback? = nil) -> some View {
         Group {
-            if isLoading {
-                // Skeleton loading
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(0..<5, id: \.self) { _ in
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.gray.opacity(0.15))
-                            .frame(height: 16)
-                            .shimmer()
-                    }
-                }
-                .padding()
-            } else if text.isEmpty {
+            if text.isEmpty && !isLoading {
                 Text("暂无内容")
                     .font(.system(size: 16))
                     .foregroundColor(.secondary)
@@ -616,20 +689,25 @@ struct ShimmerModifier: ViewModifier {
             .overlay(
                 GeometryReader { geometry in
                     LinearGradient(
-                        gradient: Gradient(colors: [
-                            Color.clear,
-                            Color.white.opacity(0.3),
-                            Color.clear
+                        gradient: Gradient(stops: [
+                            .init(color: .clear, location: 0.0),
+                            .init(color: .clear, location: 0.3),
+                            .init(color: .white.opacity(0.4), location: 0.5),
+                            .init(color: .clear, location: 0.7),
+                            .init(color: .clear, location: 1.0)
                         ]),
                         startPoint: .leading,
                         endPoint: .trailing
                     )
                     .frame(width: geometry.size.width * 2)
                     .offset(x: -geometry.size.width + phase * geometry.size.width * 2)
+                    .mask(content)
                 }
             )
+            .clipped()
             .onAppear {
-                withAnimation(Animation.linear(duration: 1.5).repeatForever(autoreverses: false)) {
+                phase = 0
+                withAnimation(Animation.linear(duration: 1.8).repeatForever(autoreverses: false)) {
                     phase = 1.0
                 }
             }
