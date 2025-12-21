@@ -1,0 +1,38 @@
+# Xcode
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+*.xcodeproj/xcshareddata/xcschemes/*.xcscheme
+!*.xcodeproj/xcshareddata/xcschemes/*.xcscheme
+*.xcworkspace
+*.xcuserdata
+
+# API Keys and Secrets
+*.xcscheme
+**/xcschemes/*.xcscheme
+.env
+.env.local
+*.key
+*.pem
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Build
+build/
+DerivedData/
+
+# Swift Package Manager
+.swiftpm/
+.build/
+
+# CocoaPods
+Pods/
+
+# Temporary files
+*.swp
+*.swo
+*~
+
