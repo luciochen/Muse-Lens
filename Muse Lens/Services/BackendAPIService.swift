@@ -45,7 +45,7 @@ class BackendAPIService {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.timeoutInterval = 8.0 // 8 second timeout for read operations
+        request.timeoutInterval = 3.0 // 3 second timeout for read operations (optimized for speed)
         
         var lastError: Error?
         for attempt in 0...retryCount {
@@ -258,7 +258,7 @@ class BackendAPIService {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("return=representation", forHTTPHeaderField: "Prefer")
-        request.timeoutInterval = 10.0 // 10 second timeout
+        request.timeoutInterval = 3.0 // 3 second timeout (optimized for speed)
         
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -470,7 +470,7 @@ class BackendAPIService {
         request.setValue(apiKey, forHTTPHeaderField: "apikey")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 5.0
+        request.timeoutInterval = 3.0 // 3 second timeout (optimized for speed)
         
         let (data, response) = try await URLSession.shared.data(for: request)
         
@@ -564,7 +564,6 @@ class BackendAPIService {
         let (data, response) = try await URLSession.shared.data(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse else {
-            let errorData = String(data: data, encoding: .utf8) ?? "Unknown error"
             print("❌ Failed to update artwork: Invalid HTTP response")
             throw BackendAPIError.saveFailed
         }
@@ -605,7 +604,7 @@ class BackendAPIService {
         request.httpMethod = "POST"
         request.setValue(apiKey, forHTTPHeaderField: "apikey")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 5.0 // 5 second timeout for non-critical operation
+        request.timeoutInterval = 3.0 // 3 second timeout (optimized for speed) // 5 second timeout for non-critical operation
         
         let body = ["artwork_id": artworkId]
         do {
@@ -654,7 +653,7 @@ class BackendAPIService {
         nameRequest.setValue(apiKey, forHTTPHeaderField: "apikey")
         nameRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         nameRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        nameRequest.timeoutInterval = 8.0
+        nameRequest.timeoutInterval = 3.0 // 3 second timeout (optimized for speed)
         
         // Try name match first
         do {
@@ -722,7 +721,7 @@ class BackendAPIService {
         request.setValue(apiKey, forHTTPHeaderField: "apikey")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 8.0 // 8 second timeout
+        request.timeoutInterval = 3.0 // 3 second timeout (optimized for speed)
         
         var lastError: Error?
         var triedFuzzyMatch = false
@@ -751,7 +750,7 @@ class BackendAPIService {
                         fuzzyNameRequest.setValue(apiKey, forHTTPHeaderField: "apikey")
                         fuzzyNameRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
                         fuzzyNameRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                        fuzzyNameRequest.timeoutInterval = 6.0
+                        fuzzyNameRequest.timeoutInterval = 3.0 // 3 second timeout (optimized for speed)
                         
                         do {
                             let (fuzzyNameData, fuzzyNameResponse) = try await URLSession.shared.data(for: fuzzyNameRequest)
@@ -781,7 +780,7 @@ class BackendAPIService {
                         fuzzyRequest.setValue(apiKey, forHTTPHeaderField: "apikey")
                         fuzzyRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
                         fuzzyRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                        fuzzyRequest.timeoutInterval = 6.0 // 6 second timeout (reduced to prevent hanging)
+                        fuzzyRequest.timeoutInterval = 3.0 // 3 second timeout (optimized for speed)
                         
                         do {
                             let (fuzzyData, fuzzyResponse) = try await URLSession.shared.data(for: fuzzyRequest)
@@ -1035,7 +1034,7 @@ class BackendAPIService {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("return=representation", forHTTPHeaderField: "Prefer")
-        request.timeoutInterval = 10.0 // 10 second timeout
+        request.timeoutInterval = 3.0 // 3 second timeout (optimized for speed)
         
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -1189,7 +1188,7 @@ class BackendAPIService {
         request.setValue(apiKey, forHTTPHeaderField: "apikey")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 5.0
+        request.timeoutInterval = 3.0 // 3 second timeout (optimized for speed)
         
         let (data, response) = try await URLSession.shared.data(for: request)
         
@@ -1233,7 +1232,7 @@ class BackendAPIService {
         request.setValue(apiKey, forHTTPHeaderField: "apikey")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 5.0
+        request.timeoutInterval = 3.0 // 3 second timeout (optimized for speed)
         
         let (data, response) = try await URLSession.shared.data(for: request)
         
@@ -1286,7 +1285,6 @@ class BackendAPIService {
         let (data, response) = try await URLSession.shared.data(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse else {
-            let errorData = String(data: data, encoding: .utf8) ?? "Unknown error"
             print("❌ Failed to update artist introduction: Invalid HTTP response")
             throw BackendAPIError.saveFailed
         }

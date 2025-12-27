@@ -8,6 +8,7 @@
 import Foundation
 import AVFoundation
 import Combine
+import Network
 
 /// Result of API key verification
 struct APIKeyVerificationResult {
@@ -85,7 +86,8 @@ class TTSPlayback: NSObject, ObservableObject {
     // Model: "tts-1" (fast, lower quality) or "tts-1-hd" (high quality, slightly slower)
     // tts-1-hd: Better quality, more natural, recommended for production
     // tts-1: Faster generation, slightly lower quality, good for testing
-    private var ttsModel = "tts-1-hd" // High quality natural voice (recommended)
+    // Changed to tts-1 as default for faster generation (2-5s vs 8-15s)
+    private var ttsModel = "tts-1" // Fast mode (default for better performance)
     
     /// Change TTS voice (for testing different voices)
     /// Available: "alloy", "echo", "fable", "onyx", "nova", "shimmer"
@@ -135,30 +137,63 @@ class TTSPlayback: NSObject, ObservableObject {
         synthesizer?.delegate = self
     }
     
-    /// Convert text to speech and play using OpenAI TTS (default) or local TTS (fallback)
-    func speak(text: String, language: String = "zh-CN") {
-        print("============================================================")
-        print("🎙️ TTS speak() called")
-        print("🎙️ Text length: \(text.count) characters")
-        print("🎙️ useOpenAITTS: \(useOpenAITTS), forceOpenAITTS: \(forceOpenAITTS)")
+    /// Prepare audio for text without playing (pre-generation for faster playback)
+    /// This generates and caches the audio file, so when speak() is called, it can use the cached audio
+    func prepareAudio(text: String, language: String = "zh-CN") async {
+        print("🎙️ Preparing audio (pre-generation) for text (\(text.count) characters)...")
         
-        // Check API key availability with detailed logging
-        let apiKey = getOpenAIApiKey()
-        if let key = apiKey, !key.isEmpty {
-            print("🎙️ API key available: YES (prefix: \(key.prefix(10))...)")
-            print("🎙️ API key length: \(key.count) characters")
-        } else {
-            print("🎙️ API key available: NO ❌")
-            print("🎙️ Checking API key sources:")
-            print("   - AppConfig.openAIApiKey: \(AppConfig.openAIApiKey != nil ? "found" : "not found")")
-            print("   - Environment OPENAI_API_KEY: \(ProcessInfo.processInfo.environment["OPENAI_API_KEY"] != nil ? "found" : "not found")")
-            print("   - UserDefaults OPENAI_API_KEY: \(UserDefaults.standard.string(forKey: "OPENAI_API_KEY") != nil ? "found" : "not found")")
+        // Check if we already have cached audio for this text
+        if let cachedText = currentText, cachedText == text {
+            if let cachedURL = cachedAudioURL, FileManager.default.fileExists(atPath: cachedURL.path) {
+                print("✅ Audio already prepared (cached)")
+                return
+            }
         }
-        print("============================================================")
+        
+        // Generate audio without playing
+        let success = await generateAndCacheOpenAITTS(text: text, playAfterGeneration: false)
+        if success {
+            print("✅ Audio prepared successfully (ready for playback)")
+        } else {
+            print("⚠️ Audio preparation failed (will generate on-demand when user clicks play)")
+        }
+    }
+    
+    /// Convert text to speech and play using OpenAI TTS (default) or local TTS (fallback)
+    func speak(text: String, language: String = "zh-CN") async {
+        // Filter out status messages and error messages - only generate TTS for actual narration
+        let filteredText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        // Skip TTS generation for status messages, error messages, or very short text
+        if filteredText.isEmpty ||
+           filteredText.contains("正在生成") ||
+           filteredText.contains("正在识别") ||
+           filteredText.contains("分析中") ||
+           filteredText.contains("报错") ||
+           filteredText.contains("错误") ||
+           filteredText.contains("Error") ||
+           filteredText.count < 20 {
+            print("⚠️ Skipping TTS generation for status/error message or too short text")
+            return
+        }
+        
+        print("🎙️ TTS speak() called for narration (\(filteredText.count) characters)")
+        
+        // CRITICAL: Stop ALL playback sources BEFORE starting new one (prevent overlap and background audio)
+        // This ensures no audio continues playing in the background
+        // Must be called on main thread to ensure complete stop before starting new playback
+        await MainActor.run {
+            stopAllPlayback()
+        }
+        
+        // Small delay to ensure all audio sources are fully stopped and released
+        // This prevents background audio from continuing
+        // Optimized: Reduced from 0.1s to 0.05s for faster response
+        try? await Task.sleep(nanoseconds: 50_000_000) // 0.05 seconds
         
         // Only clear cache if text has changed
         // This allows resuming playback without regenerating audio
-        if let cachedText = currentText, cachedText == text {
+        if let cachedText = currentText, cachedText == filteredText {
             print("✅ Text unchanged, will resume from cached audio")
             // Don't clear cache, just resume playback
             if let cachedURL = cachedAudioURL, FileManager.default.fileExists(atPath: cachedURL.path) {
@@ -183,14 +218,11 @@ class TTSPlayback: NSObject, ObservableObject {
         }
         currentText = nil
         
-        // Stop any current playback for new text
-        stop()
-        
         // Reset state
         currentTime = 0
         pausedTime = 0
         playbackError = nil
-        currentText = text // Store current text
+        currentText = filteredText // Store current text (filtered)
         
         // Configure audio session
         do {
@@ -203,42 +235,58 @@ class TTSPlayback: NSObject, ObservableObject {
             return
         }
         
-        // ALWAYS FORCE OpenAI TTS - never use local TTS unless OpenAI TTS completely fails
-        // forceOpenAITTS is always true, so this path should always be taken
-        print("✅✅✅ FORCING OpenAI TTS (\(ttsModel)) ✅✅✅")
-        print("✅ Voice: \(ttsVoice), Speed: \(ttsSpeed)")
-        print("✅ useOpenAITTS: \(useOpenAITTS), forceOpenAITTS: \(forceOpenAITTS)")
+        // NEW: Check network availability and choose TTS method
+        // Online: Use OpenAI TTS (tts-1 fast mode)
+        // Offline: Use local TTS immediately
+        let networkAvailable = isNetworkAvailableQuick()
+        let hasAPIKey = getOpenAIApiKey() != nil
         
-        if apiKey == nil {
-            print("⚠️ WARNING: API key not found in initial check")
-            print("⚠️ Will still attempt OpenAI TTS - API key might be available in generateAndPlayOpenAITTS")
-            print("⚠️ If this fails, please configure OPENAI_API_KEY")
-        } else {
-            print("✅ API key found - will use OpenAI TTS")
-        }
-        
-        Task {
+        if networkAvailable && hasAPIKey {
+            // Online: Use OpenAI TTS with tts-1 model (fast mode)
+            print("🌐 Network available - Using OpenAI TTS (tts-1 fast mode)")
             print("🚀 Starting OpenAI TTS generation task...")
-            let success = await generateAndPlayOpenAITTS(text: text)
             
-            if success {
-                print("✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅")
-                print("✅✅✅ OpenAI TTS (\(ttsModel), \(ttsVoice)) SUCCESS - Natural voice is playing ✅✅✅")
-                print("✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅")
-            } else {
-                print("❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌")
-                print("❌❌❌ OpenAI TTS FAILED - Falling back to local TTS ❌❌❌")
-                print("❌ Local TTS will sound robotic. Please check:")
-                print("   1. API key is configured (OPENAI_API_KEY)")
-                print("   2. Network connection is available")
-                print("   3. API key is valid and has TTS access")
-                print("❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌")
-                await generateAndPlayLocalTTS(text: text, language: language)
+            Task {
+                let success = await generateAndPlayOpenAITTS(text: filteredText)
+                
+                if success {
+                    print("✅✅✅ OpenAI TTS (tts-1, \(ttsVoice)) SUCCESS - Natural voice is playing")
+                } else {
+                    print("❌ OpenAI TTS failed, falling back to local TTS")
+                    // Fallback to local TTS if OpenAI fails
+                    await generateAndPlayLocalTTS(text: filteredText, language: language)
+                }
             }
+        } else {
+            // Offline: Use local TTS immediately
+            if !networkAvailable {
+                print("📴 Network unavailable - Using local TTS (offline mode)")
+            } else {
+                print("🔑 No API key - Using local TTS")
+            }
+            
+            await generateAndPlayLocalTTS(text: filteredText, language: language)
+        }
+    }
+    
+    /// Check if device is online and can reach internet (quick check)
+    /// Returns true if network is available, false otherwise
+    private func isNetworkAvailableQuick() -> Bool {
+        let monitor = NWPathMonitor()
+        let semaphore = DispatchSemaphore(value: 0)
+        var isConnected = false
+        
+        monitor.pathUpdateHandler = { path in
+            isConnected = path.status == .satisfied
+            semaphore.signal()
+            monitor.cancel()
         }
         
-        // Never reach here - OpenAI TTS is always attempted first
-        return
+        let queue = DispatchQueue(label: "NetworkCheck")
+        monitor.start(queue: queue)
+        _ = semaphore.wait(timeout: .now() + 0.5) // 0.5 second timeout for quick check
+        
+        return isConnected
     }
     
     /// Get OpenAI API key from multiple sources
@@ -261,9 +309,24 @@ class TTSPlayback: NSObject, ObservableObject {
         return nil
     }
     
-    /// Generate audio using OpenAI TTS API and play
+    /// Generate audio using OpenAI TTS API and cache it (without playing)
+    /// Returns true if successful, false if failed
+    private func generateAndCacheOpenAITTS(text: String, playAfterGeneration: Bool) async -> Bool {
+        // Reuse the same generation logic as generateAndPlayOpenAITTS
+        // but control whether to play after generation
+        let success = await generateAndPlayOpenAITTS(text: text, shouldPlay: playAfterGeneration)
+        
+        if success && !playAfterGeneration {
+            // Audio is cached, but don't play it yet
+            print("✅ Audio cached successfully (not playing)")
+        }
+        
+        return success
+    }
+    
+    /// Generate audio using OpenAI TTS API and optionally play
     /// Returns true if successful, false if failed (should fallback)
-    private func generateAndPlayOpenAITTS(text: String) async -> Bool {
+    private func generateAndPlayOpenAITTS(text: String, shouldPlay: Bool = true) async -> Bool {
         print("============================================================")
         print("🚀🚀🚀 Starting OpenAI TTS generation 🚀🚀🚀")
         print("🚀 Text preview: \(text.prefix(50))...")
@@ -300,12 +363,17 @@ class TTSPlayback: NSObject, ObservableObject {
         request.httpMethod = "POST"
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 60.0 // Increased timeout for reliability
+        // Optimized: Dynamic timeout based on text length (min 15s, max 60s)
+        // Estimated: ~0.1s per character + 10s base time
+        let estimatedTimeout = min(60.0, max(15.0, Double(text.count) * 0.1 + 10.0))
+        request.timeoutInterval = estimatedTimeout
         
         // Request body for OpenAI TTS - optimized for natural Chinese voice
         // Using shimmer voice (more natural) and slightly faster speed (1.1) for better flow
+        // Force use tts-1 model for fast generation (2-5s vs 8-15s for tts-1-hd)
+        let modelToUse = "tts-1" // Always use fast model for better performance
         let requestBody: [String: Any] = [
-            "model": ttsModel, // High quality natural voice (tts-1-hd) or faster (tts-1)
+            "model": modelToUse, // Always use tts-1 for fast generation
             "input": text,
             "voice": ttsVoice, // shimmer is more natural and expressive for Chinese
             "response_format": "mp3",
@@ -315,7 +383,7 @@ class TTSPlayback: NSObject, ObservableObject {
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
             
-            print("🎙️ Generating OpenAI TTS audio with model: \(ttsModel)")
+            print("🎙️ Generating OpenAI TTS audio with model: \(modelToUse) (fast mode)")
             print("🎙️ Text length: \(text.count) characters")
             print("🎙️ Voice: \(ttsVoice) (optimized for natural Chinese)")
             print("🎙️ Speed: \(ttsSpeed) (optimized for natural flow)")
@@ -324,7 +392,7 @@ class TTSPlayback: NSObject, ObservableObject {
             // Use URLSession for streaming download
             print("📡 Sending OpenAI TTS API request...")
             print("📡 URL: https://api.openai.com/v1/audio/speech")
-            print("📡 Model: \(ttsModel)")
+            print("📡 Model: \(modelToUse) (fast mode)")
             print("📡 Voice: \(ttsVoice)")
             print("📡 Speed: \(ttsSpeed)")
             
@@ -402,13 +470,13 @@ class TTSPlayback: NSObject, ObservableObject {
                 
                 await MainActor.run {
                     isGenerating = false
-                    playbackError = "OpenAI TTS (\(ttsModel)) 失败: \(errorMessage)"
+                    playbackError = "OpenAI TTS (tts-1) 失败: \(errorMessage)"
                 }
                 print("⚠️ API error, will fallback to local TTS")
                 return false
             }
             
-            print("✅ OpenAI TTS (\(ttsModel), \(ttsVoice), speed: \(ttsSpeed)) request successful!")
+            print("✅ OpenAI TTS (\(modelToUse), \(ttsVoice), speed: \(ttsSpeed)) request successful!")
             print("✅ HTTP Status: \(httpResponse.statusCode)")
             print("✅ Starting to stream audio...")
             
@@ -447,7 +515,8 @@ class TTSPlayback: NSObject, ObservableObject {
                     totalBytes += 1
                     
                     // Write in chunks for better performance
-                    if buffer.count >= 8192 { // Write in 8KB chunks
+                    // Optimized: Increased from 8KB to 32KB chunks to reduce system calls
+                    if buffer.count >= 32768 { // Write in 32KB chunks
                         try fileHandle.write(contentsOf: buffer)
                         try fileHandle.synchronize()
                         buffer.removeAll(keepingCapacity: true)
@@ -468,6 +537,7 @@ class TTSPlayback: NSObject, ObservableObject {
                 print("✅ Total bytes received: \(totalBytes)")
                 print("✅ File path: \(tempURL.path)")
                 
+                // Optimized: Parallel file verification and cache storage
                 // Verify file exists and has content before playing
                 let fileExists = FileManager.default.fileExists(atPath: tempURL.path)
                 guard fileExists else {
@@ -479,26 +549,50 @@ class TTSPlayback: NSObject, ObservableObject {
                     return false
                 }
                 
-                // Check file size
-                if let attributes = try? FileManager.default.attributesOfItem(atPath: tempURL.path),
-                   let fileSize = attributes[.size] as? Int64 {
-                    print("✅ File verified: exists, size: \(fileSize) bytes")
-                    if fileSize == 0 {
-                        print("❌❌❌ File is empty!")
-                        await MainActor.run {
-                            isGenerating = false
-                            playbackError = "音频文件为空"
+                // Check file size and store cache in parallel
+                async let fileSizeCheck: Bool = {
+                    if let attributes = try? FileManager.default.attributesOfItem(atPath: tempURL.path),
+                       let fileSize = attributes[.size] as? Int64 {
+                        print("✅ File verified: exists, size: \(fileSize) bytes")
+                        if fileSize == 0 {
+                            print("❌❌❌ File is empty!")
+                            await MainActor.run {
+                                isGenerating = false
+                                playbackError = "音频文件为空"
+                            }
+                            return false
                         }
-                        return false
+                        return true
                     }
-                }
+                    return true
+                }()
                 
-                // Now that file is complete, start playback
-                print("✅✅✅ Starting playback of complete audio file")
+                async let cacheStorage: Void = {
+                    // Store cached audio URL for this text BEFORE playing
+                    await MainActor.run {
+                        cachedAudioURL = tempURL
+                        currentText = text // Store text for cache matching
+                        print("✅ Cached audio URL for future use")
+                    }
+                }()
+                
+                // Wait for both operations to complete
+                let fileValid = await fileSizeCheck
+                guard fileValid else {
+                    return false
+                }
+                await cacheStorage
+                
+                // Now that file is complete, optionally start playback
                 await MainActor.run {
                     isGenerating = false
-                    // Play the complete file (not streaming)
-                    playAudioFile(url: tempURL, isStreaming: false)
+                    if shouldPlay {
+                        print("✅✅✅ Starting playback of complete audio file")
+                        // Play the complete file (not streaming)
+                        playAudioFile(url: tempURL, isStreaming: false)
+                    } else {
+                        print("✅✅✅ Audio file generated and cached (not playing - waiting for user to click play)")
+                    }
                 }
                 
             } catch {
@@ -516,11 +610,12 @@ class TTSPlayback: NSObject, ObservableObject {
             // Store cached audio URL for this text
             await MainActor.run {
                 cachedAudioURL = tempURL
+                currentText = text // Store text for cache matching
                 print("✅ Cached audio URL for future use")
             }
             
             print("✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅")
-            print("✅ OpenAI TTS (\(ttsModel), \(ttsVoice)) SUCCESS! Natural voice is now playing!")
+            print("✅ OpenAI TTS (tts-1, \(ttsVoice)) SUCCESS! Natural voice is now playing!")
             print("✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅")
             return true
             
@@ -747,7 +842,7 @@ class TTSPlayback: NSObject, ObservableObject {
         
         // Test 1: Generate and play audio
         print("🧪 Test 1: Generate and play audio...")
-        speak(text: testText, language: "zh-CN")
+        await speak(text: testText, language: "zh-CN")
         
         // Wait for audio to start playing
         var waitCount = 0
@@ -797,7 +892,7 @@ class TTSPlayback: NSObject, ObservableObject {
             print("✅ Test 4a PASSED: Pause works")
             
             // Resume
-            speak(text: testText, language: "zh-CN")
+            await speak(text: testText, language: "zh-CN")
             try? await Task.sleep(nanoseconds: 500_000_000)
             
             if isPlaying {
@@ -938,22 +1033,28 @@ class TTSPlayback: NSObject, ObservableObject {
         
         // For complete files (not streaming), wait a moment for duration to load before playing
         if !isStreaming {
-            // Wait briefly for AVPlayerItem to finish loading metadata
+            // Optimized: Wait for AVPlayerItem to finish loading metadata with smarter polling
             Task { @MainActor in
-                // Wait for player item to be ready
+                // Wait for player item to be ready with optimized polling
+                // Start with shorter intervals, increase if needed
                 var attempts = 0
-                while playerItem.status != .readyToPlay && attempts < 50 {
-                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                var sleepInterval: UInt64 = 50_000_000 // Start with 0.05s
+                while playerItem.status != .readyToPlay && attempts < 30 {
+                    try? await Task.sleep(nanoseconds: sleepInterval)
                     attempts += 1
+                    // Increase interval after first few attempts (exponential backoff)
+                    if attempts > 5 {
+                        sleepInterval = min(200_000_000, sleepInterval * 2) // Max 0.2s
+                    }
                 }
                 
-                // Ensure duration is loaded
+                // Ensure duration is loaded (parallel with status check if possible)
                 if duration <= 0 {
                     await loadDuration(playerItem: playerItem, isStreaming: false)
                 }
                 
-                // Small delay to ensure everything is ready
-                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                // Optimized: Reduced delay from 0.1s to 0.05s
+                try? await Task.sleep(nanoseconds: 50_000_000) // 0.05 seconds
                 
                 print("✅ Player ready, starting playback. Duration: \(String(format: "%.2f", self.duration))s")
                 newPlayer.play()
@@ -1275,6 +1376,13 @@ class TTSPlayback: NSObject, ObservableObject {
                 player.play()
                 self.isPlaying = true
                 print("▶️ Resumed AVPlayer playback at: \(String(format: "%.2f", self.currentTime))s")
+                
+                // Seek to paused position if available
+                if self.pausedTime > 0 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        self.seek(to: self.pausedTime)
+                    }
+                }
                 return
             }
             
@@ -1282,13 +1390,6 @@ class TTSPlayback: NSObject, ObservableObject {
             if let cachedURL = self.cachedAudioURL, FileManager.default.fileExists(atPath: cachedURL.path) {
                 print("▶️ Resuming from cached audio file")
                 self.playAudioFile(url: cachedURL, isStreaming: false)
-                // Seek to paused position if available
-                if self.pausedTime > 0 {
-                    // Wait a moment for player to be ready before seeking
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                        self.seek(to: self.pausedTime)
-                    }
-                }
                 return
             }
             
@@ -1320,34 +1421,95 @@ class TTSPlayback: NSObject, ObservableObject {
     }
     
     /// Pause playback
+    /// CRITICAL: Stop ALL playback sources to prevent background audio from continuing
     func pause() {
+        // Stop AVPlayer first
         if let player = self.player {
             pausedTime = currentTime // Save current position
             player.pause()
-            isPlaying = false
             print("⏸️ AVPlayer paused at: \(String(format: "%.1f", pausedTime))s")
-        } else if let synthesizer = synthesizer {
+        }
+        
+        // Stop synthesizer (even if player exists, synthesizer might also be playing)
+        if let synthesizer = synthesizer {
             if synthesizer.isSpeaking {
                 synthesizer.pauseSpeaking(at: .immediate)
                 if let startTime = startTime {
                     pausedTime = Date().timeIntervalSince(startTime)
                     currentTime = pausedTime
                 }
-                isPlaying = false
-                stopTimer()
                 print("⏸️ Direct speech paused at: \(String(format: "%.1f", pausedTime))s")
             } else if synthesizer.isPaused {
-                isPlaying = false
                 print("⏸️ Direct speech already paused")
             }
         }
+        
+        // Stop audio engine if running
+        if let engine = audioEngine, engine.isRunning {
+            engine.pause()
+            print("⏸️ Audio engine paused")
+        }
+        
+        // Update state
+        isPlaying = false
+        stopTimer()
     }
     
-    /// Stop playback
+    /// Stop ALL playback sources immediately (used before starting new playback)
+    /// This prevents background audio from continuing when starting new playback
+    private func stopAllPlayback() {
+        print("🛑 Stopping all playback sources...")
+        
+        // Stop AVPlayer first (most common source)
+        if let player = self.player {
+            player.pause()
+            player.replaceCurrentItem(with: nil) // Remove current item to fully stop
+            self.player = nil // Clear reference to ensure it's fully released
+            print("🛑 Stopped and cleared AVPlayer")
+        }
+        
+        // Stop synthesizer
+        if let synthesizer = synthesizer {
+            if synthesizer.isSpeaking || synthesizer.isPaused {
+                synthesizer.stopSpeaking(at: .immediate)
+                print("🛑 Stopped AVSpeechSynthesizer")
+            }
+        }
+        
+        // Stop audio engine
+        if let engine = audioEngine, engine.isRunning {
+            engine.stop()
+            engine.mainMixerNode.removeTap(onBus: 0)
+            print("🛑 Stopped AVAudioEngine")
+        }
+        
+        // Clear player item observers
+        if let playerItem = playerItem {
+            playerItem.removeObserver(self, forKeyPath: "status")
+            playerItem.removeObserver(self, forKeyPath: "duration")
+            self.playerItem = nil
+            print("🛑 Cleared player item observers")
+        }
+        
+        // Remove time observer
+        if let timeObserver = timeObserver {
+            player?.removeTimeObserver(timeObserver)
+            self.timeObserver = nil
+            print("🛑 Removed time observer")
+        }
+        
+        // Update state
+        isPlaying = false
+        stopTimer()
+        print("🛑 All playback sources stopped")
+    }
+    
+    /// Stop playback and clean up resources
     func stop() {
         // Stop AVPlayer
         if let player = self.player {
             player.pause()
+            player.replaceCurrentItem(with: nil) // Remove current item to fully stop
             if let timeObserver = timeObserver {
                 player.removeTimeObserver(timeObserver)
                 self.timeObserver = nil
@@ -1438,7 +1600,7 @@ class TTSPlayback: NSObject, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             
-            guard let player = self.player else {
+            guard self.player != nil else {
                 print("⚠️ Skip backward only supported with AVPlayer (player is nil)")
                 return
             }

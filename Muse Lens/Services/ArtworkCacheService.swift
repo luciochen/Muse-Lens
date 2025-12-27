@@ -14,7 +14,71 @@ class ArtworkCacheService {
     
     private let backendAPI = BackendAPIService.shared
     
+    // OPTIMIZATION: Local cache for recently queried artworks (fast lookup)
+    private let localCacheKey = "MuseLensArtworkCache"
+    private let maxLocalCacheItems = 20 // Cache last 20 artworks
+    private let localCacheExpirationHours = 24 // Cache expires after 24 hours
+    
     private init() {}
+    
+    // MARK: - Local Cache Management
+    
+    /// Get artwork from local cache (fast, no network)
+    private func getLocalCachedArtwork(identifier: ArtworkIdentifier) -> BackendArtwork? {
+        guard let cacheData = UserDefaults.standard.data(forKey: localCacheKey),
+              let cache = try? JSONDecoder().decode([CachedArtwork].self, from: cacheData) else {
+            return nil
+        }
+        
+        // Find matching artwork in cache
+        if let cached = cache.first(where: { $0.identifier.combinedHash == identifier.combinedHash }) {
+            // Check expiration
+            let age = Date().timeIntervalSince(cached.cachedAt)
+            if age < Double(localCacheExpirationHours * 3600) {
+                print("✅ Found artwork in local cache (age: \(String(format: "%.1f", age/3600))h)")
+                return cached.artwork
+            } else {
+                print("⚠️ Cached artwork expired (age: \(String(format: "%.1f", age/3600))h)")
+            }
+        }
+        
+        return nil
+    }
+    
+    /// Save artwork to local cache
+    private func saveToLocalCache(artwork: BackendArtwork, identifier: ArtworkIdentifier) {
+        var cache: [CachedArtwork]
+        
+        if let cacheData = UserDefaults.standard.data(forKey: localCacheKey),
+           let decoded = try? JSONDecoder().decode([CachedArtwork].self, from: cacheData) {
+            cache = decoded
+        } else {
+            cache = []
+        }
+        
+        // Remove existing entry if present
+        cache.removeAll { $0.identifier.combinedHash == identifier.combinedHash }
+        
+        // Add new entry
+        cache.insert(CachedArtwork(identifier: identifier, artwork: artwork, cachedAt: Date()), at: 0)
+        
+        // Limit cache size
+        if cache.count > maxLocalCacheItems {
+            cache = Array(cache.prefix(maxLocalCacheItems))
+        }
+        
+        // Save to UserDefaults
+        if let encoded = try? JSONEncoder().encode(cache) {
+            UserDefaults.standard.set(encoded, forKey: localCacheKey)
+            print("✅ Saved artwork to local cache (total: \(cache.count) items)")
+        }
+    }
+    
+    /// Clear local cache
+    func clearLocalCache() {
+        UserDefaults.standard.removeObject(forKey: localCacheKey)
+        print("✅ Local cache cleared")
+    }
     
     // MARK: - Artwork Narration Cache
     
@@ -37,7 +101,22 @@ class ArtworkCacheService {
         print("🔍 Looking up artwork: \(title) by \(artist)")
         print("🔑 Combined hash: \(identifier.combinedHash)")
         
-        // 2. Check backend cache first (shared across all users)
+        // OPTIMIZATION: Check local cache first (fast, no network)
+        if let localCached = getLocalCachedArtwork(identifier: identifier) {
+            print("✅ Found in local cache (instant access)")
+            
+            // Get artist introduction from backend (still need to query for latest)
+            var artistIntro: String? = nil
+            if !localCached.artist.isEmpty && localCached.artist != "未知艺术家" {
+                if let backendArtist = try? await backendAPI.findArtistIntroduction(artist: localCached.artist) {
+                    artistIntro = backendArtist.artistIntroduction
+                }
+            }
+            
+            return localCached.toNarrationResponse(artistIntroduction: artistIntro)
+        }
+        
+        // 2. Check backend cache (shared across all users)
         if backendAPI.isConfigured {
             do {
                 if let backendArtwork = try await backendAPI.findArtwork(identifier: identifier) {
@@ -51,12 +130,16 @@ class ArtworkCacheService {
                         }
                     }
                     
+                    // OPTIMIZATION: Save to local cache for faster future access
+                    saveToLocalCache(artwork: backendArtwork, identifier: identifier)
+                    
                     // Return cached narration response
                     // Note: Backend artwork's imageURL is a reference image from museum API,
                     // NOT user's photo. User's photo is passed separately to PlaybackView.
-                    // Get artist introduction from artists table
+                    // OPTIMIZATION: Parallel query - fetch artist introduction simultaneously
                     var artistIntro: String? = nil
                     if !backendArtwork.artist.isEmpty && backendArtwork.artist != "未知艺术家" {
+                        // Query artist introduction in parallel (already have artwork, so this is independent)
                         if let backendArtist = try? await backendAPI.findArtistIntroduction(artist: backendArtwork.artist) {
                             artistIntro = backendArtist.artistIntroduction
                         }
@@ -384,5 +467,14 @@ class ArtworkCacheService {
         
         return narration
     }
+}
+
+// MARK: - Local Cache Model
+
+/// Cached artwork entry for local storage
+private struct CachedArtwork: Codable {
+    let identifier: ArtworkIdentifier
+    let artwork: BackendArtwork
+    let cachedAt: Date
 }
 

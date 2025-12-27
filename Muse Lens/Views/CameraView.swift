@@ -10,6 +10,31 @@ import AVFoundation
 import UIKit
 import Foundation
 
+/// Data structure for PlaybackView - ensures view updates when data changes
+struct PlaybackData: Identifiable {
+    let id: UUID
+    let artworkInfo: ArtworkInfo
+    let narration: String
+    let artistIntroduction: String
+    let userImage: UIImage?
+    let confidence: Double?
+    
+    init(
+        artworkInfo: ArtworkInfo,
+        narration: String,
+        artistIntroduction: String = "",
+        userImage: UIImage? = nil,
+        confidence: Double? = nil
+    ) {
+        self.id = artworkInfo.id // Use artworkInfo.id to ensure uniqueness
+        self.artworkInfo = artworkInfo
+        self.narration = narration
+        self.artistIntroduction = artistIntroduction
+        self.userImage = userImage
+        self.confidence = confidence
+    }
+}
+
 struct CameraView: UIViewControllerRepresentable {
     @Binding var capturedImage: UIImage?
     @Binding var isPresented: Bool
@@ -99,11 +124,7 @@ struct CameraCaptureView: View {
     @State private var capturedImage: UIImage?
     @State private var isProcessing = false
     @State private var errorMessage: String?
-    @State private var showPlayback = false
-    @State private var artworkInfo: ArtworkInfo?
-    @State private var narration: String?
-    @State private var artistIntroduction: String?
-    @State private var confidence: Double?
+    @State private var playbackData: PlaybackData? // Use PlaybackData instead of separate states
     @State private var showHistory = false
     @State private var showDatabaseTest = false
     @State private var lastCapturedImage: UIImage? // Store image for retry
@@ -292,16 +313,14 @@ struct CameraCaptureView: View {
         .sheet(isPresented: $showCamera) {
             CameraView(capturedImage: $capturedImage, isPresented: $showCamera)
         }
-        .fullScreenCover(isPresented: $showPlayback) {
-            if let artworkInfo = artworkInfo, let narration = narration {
-                PlaybackView(
-                    artworkInfo: artworkInfo,
-                    narration: narration,
-                    artistIntroduction: artistIntroduction ?? "",
-                    userImage: capturedImage,
-                    confidence: confidence
-                )
-            }
+        .fullScreenCover(item: $playbackData) { data in
+            PlaybackView(
+                artworkInfo: data.artworkInfo,
+                narration: data.narration,
+                artistIntroduction: data.artistIntroduction,
+                userImage: data.userImage,
+                confidence: data.confidence
+            )
         }
         .sheet(isPresented: $showHistory) {
             HistoryView()
@@ -357,11 +376,14 @@ struct CameraCaptureView: View {
                         let narrationResponse = try await NarrationService.shared.generateNarrationFromImage(imageBase64: imageBase64)
                         
                         await MainActor.run {
-                            self.artworkInfo = narrationResponse.toArtworkInfo(imageURL: artwork.imageURL, recognized: true)
-                            self.narration = narrationResponse.narration
-                            self.artistIntroduction = narrationResponse.artistIntroduction ?? ""
-                            self.confidence = narrationResponse.confidence
-                            self.showPlayback = true
+                            let artworkInfo = narrationResponse.toArtworkInfo(imageURL: artwork.imageURL, recognized: true)
+                            self.playbackData = PlaybackData(
+                                artworkInfo: artworkInfo,
+                                narration: narrationResponse.narration,
+                                artistIntroduction: narrationResponse.artistIntroduction ?? "",
+                                userImage: capturedImage,
+                                confidence: narrationResponse.confidence
+                            )
                         }
                         return
                     }
@@ -380,11 +402,13 @@ struct CameraCaptureView: View {
                 这是一件珍贵的艺术作品，展现了艺术家的独特视角和创作技巧。
                 """
                 
-                self.artworkInfo = artwork
-                self.narration = narration
-                self.artistIntroduction = nil
-                self.confidence = 1.0 // High confidence for searched artworks
-                self.showPlayback = true
+                self.playbackData = PlaybackData(
+                    artworkInfo: artwork,
+                    narration: narration,
+                    artistIntroduction: "",
+                    userImage: capturedImage,
+                    confidence: 1.0 // High confidence for searched artworks
+                )
             }
         }
     }
@@ -458,6 +482,8 @@ struct CameraCaptureView: View {
         
         Task {
             let totalStartTime = Date()
+            let maxTotalTime: TimeInterval = 20.0 // Maximum total time: 20 seconds
+            
             do {
                 // Check API key configuration
                 guard AppConfig.isConfigured else {
@@ -530,10 +556,14 @@ struct CameraCaptureView: View {
                 )
                 
                 await MainActor.run {
-                    self.artworkInfo = placeholderInfo
-                    self.narration = ""
+                    self.playbackData = PlaybackData(
+                        artworkInfo: placeholderInfo,
+                        narration: "",
+                        artistIntroduction: "",
+                        userImage: capturedImage,
+                        confidence: nil
+                    )
                     self.isProcessing = false
-                    self.showPlayback = true
                     print("✅ Showing playback view with skeleton loading")
                 }
                 
@@ -544,15 +574,46 @@ struct CameraCaptureView: View {
                 print("🔍 Step 1: Quick identification to get basic artwork info...")
                 var quickId: (title: String, artist: String, year: String?)? = nil
                 do {
+                    // Check total timeout before starting
+                    let elapsed = Date().timeIntervalSince(totalStartTime)
+                    if elapsed > maxTotalTime {
+                        throw NarrationService.NarrationError.networkTimeout
+                    }
+                    
                     quickId = try await NarrationService.shared.quickIdentifyArtwork(imageBase64: imageBase64)
                     print("📝 Quick identification result: '\(quickId!.title)' by '\(quickId!.artist)'")
+                    
+                    // Check total timeout after Step 1
+                    let elapsedAfterStep1 = Date().timeIntervalSince(totalStartTime)
+                    if elapsedAfterStep1 > maxTotalTime {
+                        throw NarrationService.NarrationError.networkTimeout
+                    }
                 } catch {
                     print("⚠️ Quick identification failed: \(error), will proceed with full generation")
                 }
                 
                 // STEP 2: Check database for artwork and artist (if identification succeeded)
+                // OPTIMIZATION: Incremental display - show basic info immediately after quick identification
                 if let id = quickId, id.title != "无法识别" && id.artist != "未知艺术家" {
                     print("🔍 Step 2: Checking database for artwork and artist...")
+                    
+                    // OPTIMIZATION: Incremental display - update UI with quick identification results
+                    await MainActor.run {
+                        let artworkInfo = ArtworkInfo(
+                            title: ArtworkIdentifier.cleanTitle(id.title),
+                            artist: id.artist,
+                            year: id.year,
+                            recognized: true
+                        )
+                        self.playbackData = PlaybackData(
+                            artworkInfo: artworkInfo,
+                            narration: "正在加载讲解内容...",
+                            artistIntroduction: "",
+                            userImage: capturedImage,
+                            confidence: nil
+                        )
+                        print("✅ Updated UI with quick identification results")
+                    }
                     
                     // Generate identifier and check backend cache
                     let identifier = ArtworkIdentifier.generate(
@@ -564,8 +625,30 @@ struct CameraCaptureView: View {
                     // Check if backend has cached narration for this artwork
                     if BackendAPIService.shared.isConfigured {
                         do {
-                            // Check artwork in database
-                            if let backendArtwork = try await BackendAPIService.shared.findArtwork(identifier: identifier) {
+                            // OPTIMIZATION: Parallel queries - check artwork and artist introduction simultaneously
+                            let artistName = id.artist
+                            let shouldCheckArtist = !artistName.isEmpty && artistName != "未知艺术家"
+                            
+                            async let artworkTask = BackendAPIService.shared.findArtwork(identifier: identifier)
+                            async let artistTask: BackendArtist? = {
+                                guard shouldCheckArtist else { return nil }
+                                return try? await BackendAPIService.shared.findArtistIntroduction(artist: artistName)
+                            }()
+                            
+                            // Check total timeout before waiting for database queries
+                            let elapsedBeforeDB = Date().timeIntervalSince(totalStartTime)
+                            if elapsedBeforeDB > maxTotalTime {
+                                throw NarrationService.NarrationError.networkTimeout
+                            }
+                            
+                            // Wait for both queries to complete
+                            if let backendArtwork = try await artworkTask {
+                                // Check total timeout after database queries
+                                let elapsedAfterDB = Date().timeIntervalSince(totalStartTime)
+                                if elapsedAfterDB > maxTotalTime {
+                                    throw NarrationService.NarrationError.networkTimeout
+                                }
+                                
                                 print("✅ Found artwork in database: '\(backendArtwork.title)' by '\(backendArtwork.artist)'")
                                 print("📝 Using cached narration from database, skipping generation (saving time and API costs)")
                                 
@@ -576,12 +659,11 @@ struct CameraCaptureView: View {
                                     }
                                 }
                                 
-                                // Check artist introduction in database
+                                // Get artist introduction result (already fetched in parallel)
                                 var cachedIntroduction: String? = nil
-                                let artistName = backendArtwork.artist
-                                if !artistName.isEmpty && artistName != "未知艺术家" {
-                                    print("🔍 Checking database for artist introduction: \(artistName)")
-                                    if let backendArtist = try? await BackendAPIService.shared.findArtistIntroduction(artist: artistName) {
+                                if shouldCheckArtist {
+                                    let backendArtist = await artistTask
+                                    if let backendArtist = backendArtist {
                                         if let artistIntro = backendArtist.artistIntroduction, !artistIntro.isEmpty {
                                             cachedIntroduction = artistIntro
                                             print("✅ Found artist introduction in database: \(artistIntro.count) characters")
@@ -628,10 +710,121 @@ struct CameraCaptureView: View {
                     print("🤖 Step 3: No cached data found in database, generating full narration...")
                     print("🤖 Sending image to ChatGPT for full analysis and narration generation...")
                     
-                    // Generate narration with confidence assessment
-                    let generatedNarrationResponse = try await NarrationService.shared.generateNarrationFromImage(
-                        imageBase64: imageBase64
-                    )
+                    // OPTIMIZATION: Incremental display - update UI to show "正在生成讲解..."
+                    await MainActor.run {
+                        let currentData = self.playbackData
+                        let currentInfo = currentData?.artworkInfo
+                        let artworkInfo: ArtworkInfo
+                        if let currentInfo = currentInfo {
+                            if currentInfo.title == "正在识别..." || currentInfo.title.isEmpty {
+                                // Create new ArtworkInfo with updated title (struct is immutable)
+                                artworkInfo = ArtworkInfo(
+                                    title: "正在生成讲解...",
+                                    artist: currentInfo.artist,
+                                    year: currentInfo.year,
+                                    style: currentInfo.style,
+                                    medium: currentInfo.medium,
+                                    museum: currentInfo.museum,
+                                    sources: currentInfo.sources,
+                                    imageURL: currentInfo.imageURL,
+                                    recognized: currentInfo.recognized
+                                )
+                            } else {
+                                // Keep existing artworkInfo
+                                artworkInfo = currentInfo
+                            }
+                        } else {
+                            // Create placeholder if artworkInfo is nil
+                            artworkInfo = ArtworkInfo(
+                                title: "正在生成讲解...",
+                                artist: "分析中",
+                                recognized: false
+                            )
+                        }
+                        self.playbackData = PlaybackData(
+                            artworkInfo: artworkInfo,
+                            narration: "正在分析作品并生成详细讲解...",
+                            artistIntroduction: currentData?.artistIntroduction ?? "",
+                            userImage: capturedImage,
+                            confidence: currentData?.confidence
+                        )
+                    }
+                    
+                    // Check total timeout before starting narration generation
+                    let elapsedBeforeGeneration = Date().timeIntervalSince(totalStartTime)
+                    if elapsedBeforeGeneration > maxTotalTime {
+                        throw NarrationService.NarrationError.networkTimeout
+                    }
+                    
+                    // Generate narration with streaming support - updates UI progressively
+                    var generatedNarrationResponse: NarrationResponse
+                    let generationStartTime = Date()
+                    let maxGenerationTime: TimeInterval = 12.0 // Maximum 12 seconds for generation
+                    
+                    do {
+                        // Try streaming first for better UX
+                        generatedNarrationResponse = try await NarrationService.shared.generateNarrationFromImageStreaming(
+                            imageBase64: imageBase64
+                        ) { partialText in
+                            // Check timeout during streaming
+                            let elapsed = Date().timeIntervalSince(generationStartTime)
+                            if elapsed > maxGenerationTime {
+                                // Don't throw here, let the request timeout naturally
+                                print("⚠️ Generation taking longer than expected: \(String(format: "%.2f", elapsed))s")
+                            }
+                            
+                            // Update narration text progressively as it's generated
+                            Task { @MainActor in
+                                if let currentData = self.playbackData {
+                                    self.playbackData = PlaybackData(
+                                        artworkInfo: currentData.artworkInfo,
+                                        narration: partialText,
+                                        artistIntroduction: currentData.artistIntroduction,
+                                        userImage: currentData.userImage,
+                                        confidence: currentData.confidence
+                                    )
+                                }
+                            }
+                        }
+                        
+                        // Check total timeout after streaming generation
+                        let elapsedAfterGeneration = Date().timeIntervalSince(totalStartTime)
+                        if elapsedAfterGeneration > maxTotalTime {
+                            throw NarrationService.NarrationError.networkTimeout
+                        }
+                    } catch let error as NarrationService.NarrationError {
+                        // If streaming times out, don't fallback - fail fast
+                        if error == .networkTimeout {
+                            print("❌ Streaming generation timed out, failing fast instead of fallback")
+                            throw error
+                        }
+                        
+                        // Fallback to non-streaming only for non-timeout errors
+                        print("⚠️ Streaming failed, using non-streaming: \(error)")
+                        
+                        // Check total timeout before fallback
+                        let elapsedBeforeFallback = Date().timeIntervalSince(totalStartTime)
+                        if elapsedBeforeFallback > maxTotalTime {
+                            throw NarrationService.NarrationError.networkTimeout
+                        }
+                        
+                        generatedNarrationResponse = try await NarrationService.shared.generateNarrationFromImage(
+                            imageBase64: imageBase64
+                        )
+                        
+                        // Check total timeout after fallback generation
+                        let elapsedAfterFallback = Date().timeIntervalSince(totalStartTime)
+                        if elapsedAfterFallback > maxTotalTime {
+                            throw NarrationService.NarrationError.networkTimeout
+                        }
+                    } catch {
+                        // For other errors, check timeout and rethrow
+                        let elapsed = Date().timeIntervalSince(totalStartTime)
+                        if elapsed > maxTotalTime {
+                            throw NarrationService.NarrationError.networkTimeout
+                        }
+                        throw error
+                    }
                     
                     // Validate narration is not empty
                     guard !generatedNarrationResponse.narration.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -640,6 +833,27 @@ struct CameraCaptureView: View {
                     
                     print("📊 Recognition confidence: \(generatedNarrationResponse.confidence) (\(generatedNarrationResponse.confidenceLevel))")
                     print("📝 AI-generated info - Title: '\(generatedNarrationResponse.title)', Artist: '\(generatedNarrationResponse.artist)', Year: '\(generatedNarrationResponse.year ?? "null")', Style: '\(generatedNarrationResponse.style ?? "null")'")
+                    
+                    // OPTIMIZATION: Update UI with final structured data
+                    await MainActor.run {
+                        let artworkInfo = ArtworkInfo(
+                            title: ArtworkIdentifier.cleanTitle(generatedNarrationResponse.title),
+                            artist: generatedNarrationResponse.artist,
+                            year: generatedNarrationResponse.year,
+                            style: generatedNarrationResponse.style,
+                            recognized: generatedNarrationResponse.confidenceLevel == .high
+                        )
+                        // Narration text is already updated progressively via streaming
+                        // But ensure final version is set
+                        self.playbackData = PlaybackData(
+                            artworkInfo: artworkInfo,
+                            narration: generatedNarrationResponse.narration,
+                            artistIntroduction: self.playbackData?.artistIntroduction ?? "",
+                            userImage: capturedImage,
+                            confidence: generatedNarrationResponse.confidence
+                        )
+                        print("✅ Updated UI with final AI-generated data")
+                    }
                     
                     // Use cache service to get artwork narration (may save to backend)
                     narrationResponse = await ArtworkCacheService.shared.getArtworkWithArtistIntroduction(
@@ -660,41 +874,53 @@ struct CameraCaptureView: View {
                 // Variable to store verified info for later use
                 var verifiedInfo: ArtworkInfo? = nil
                 
-                // For high confidence, ALWAYS verify information from online sources
+                // OPTIMIZATION: Online verification async - don't block main flow
+                // For high confidence, verify information from online sources in background
                 if finalNarrationResponse.confidenceLevel == .high {
-                    print("🔍 High confidence detected, verifying information from online sources...")
+                    print("🔍 High confidence detected, verifying information from online sources (async, non-blocking)...")
                     
-                    // Try multiple search strategies with the AI-generated information
-                    var searchCandidates: [RecognitionCandidate] = []
-                    
-                    // Strategy 1: Use artwork title and artist
-                    searchCandidates.append(RecognitionCandidate(
-                        artworkName: finalNarrationResponse.title,
-                        artist: finalNarrationResponse.artist != "未知艺术家" ? finalNarrationResponse.artist : nil,
-                        confidence: finalNarrationResponse.confidence
-                    ))
-                    
-                    // Strategy 2: Try with artist name variations (if available)
-                    let artist = finalNarrationResponse.artist
-                    if artist != "未知艺术家" && !artist.isEmpty {
-                        // Try English name if Chinese name was provided
-                        if artist.contains("·") || artist.contains("达") {
-                            // Might be Chinese name, try searching with just artwork name first
-                            searchCandidates.append(RecognitionCandidate(
-                                artworkName: finalNarrationResponse.title,
-                                artist: nil,
-                                confidence: finalNarrationResponse.confidence
-                            ))
+                    // OPTIMIZATION: Run verification in background task, don't wait for it
+                    Task.detached(priority: .utility) {
+                        // Try multiple search strategies with the AI-generated information
+                        var searchCandidates: [RecognitionCandidate] = []
+                        
+                        // Strategy 1: Use artwork title and artist
+                        searchCandidates.append(RecognitionCandidate(
+                            artworkName: finalNarrationResponse.title,
+                            artist: finalNarrationResponse.artist != "未知艺术家" ? finalNarrationResponse.artist : nil,
+                            confidence: finalNarrationResponse.confidence
+                        ))
+                        
+                        // Strategy 2: Try with artist name variations (if available)
+                        let artist = finalNarrationResponse.artist
+                        if artist != "未知艺术家" && !artist.isEmpty {
+                            // Try English name if Chinese name was provided
+                            if artist.contains("·") || artist.contains("达") {
+                                // Might be Chinese name, try searching with just artwork name first
+                                searchCandidates.append(RecognitionCandidate(
+                                    artworkName: finalNarrationResponse.title,
+                                    artist: nil,
+                                    confidence: finalNarrationResponse.confidence
+                                ))
+                            }
+                        }
+                        
+                        // Try to retrieve verified information
+                        var verified: ArtworkInfo? = nil
+                        for candidate in searchCandidates {
+                            if let info = await RetrievalService.shared.retrieveArtworkInfo(candidates: [candidate]) {
+                                verified = info
+                                break
+                            }
+                        }
+                        
+                        // Verification completed, but we don't use it to block the main flow
+                        // The verified info can be used for future enhancements if needed
+                        if verified != nil {
+                            print("✅ Background verification completed (not blocking main flow)")
                         }
                     }
-                    
-                    // Try to retrieve verified information
-                    for candidate in searchCandidates {
-                        if let info = await RetrievalService.shared.retrieveArtworkInfo(candidates: [candidate]) {
-                            verifiedInfo = info
-                            break
-                        }
-                    }
+                    // Continue immediately without waiting for verification
                     
                     // PRIORITIZE AI-generated information (from narration) over API verification
                     // The narration content is more accurate according to user feedback
@@ -859,17 +1085,36 @@ struct CameraCaptureView: View {
                     // CRITICAL: User's photo (capturedImage) is preserved and will always be displayed
                     // Backend imageURL is only a reference from museum API, NOT user's photo
                     // PlaybackView prioritizes userImage over artworkInfo.imageURL
-                    self.artworkInfo = finalArtworkInfo
-                    self.narration = finalNarrationResponse.narration
-                    self.artistIntroduction = finalNarrationResponse.artistIntroduction ?? ""
-                    self.confidence = finalNarrationResponse.confidence
+                    self.playbackData = PlaybackData(
+                        artworkInfo: finalArtworkInfo,
+                        narration: finalNarrationResponse.narration,
+                        artistIntroduction: finalNarrationResponse.artistIntroduction ?? "",
+                        userImage: capturedImage,
+                        confidence: finalNarrationResponse.confidence
+                    )
                     // capturedImage is already set and preserved - it contains user's photo
                     // It will be passed to PlaybackView as userImage parameter
                     print("✅ Updated playback view with final data")
                     print("✅ User photo preserved (capturedImage will be displayed, not backend reference image)")
                 }
                 
+                // OPTIMIZATION: TTS pre-generation - start generating audio immediately after content is displayed
+                // This allows audio to be ready when user clicks play button
+                let fullText = finalNarrationResponse.narration
+                if !fullText.isEmpty {
+                    Task.detached(priority: .userInitiated) {
+                        print("🎙️ Pre-generating TTS audio for narration (\(fullText.count) characters)...")
+                        // Pre-generate audio (but don't play it yet)
+                        // The speak() function will check for cached audio and use it if available
+                        await TTSPlayback.shared.prepareAudio(text: fullText, language: "zh-CN")
+                        print("✅ TTS audio pre-generation completed")
+                    }
+                }
+                
             } catch {
+                let totalElapsed = Date().timeIntervalSince(totalStartTime)
+                print("⏱️ Total processing time: \(String(format: "%.2f", totalElapsed))s")
+                
                 await MainActor.run {
                     // Provide user-friendly error messages
                     if let narrationError = error as? NarrationService.NarrationError {
@@ -889,7 +1134,7 @@ struct CameraCaptureView: View {
                         case .imageProcessingFailed:
                             errorMessage = "图片处理失败，请重试"
                         case .networkTimeout:
-                            errorMessage = "请求超时。请检查网络连接后重试。"
+                            errorMessage = "请求超时（超过20秒）。请检查网络连接后重试。"
                         case .networkUnavailable:
                             errorMessage = "网络不可用。请检查您的网络连接。"
                         case .apiError(let code, let message):
@@ -908,11 +1153,21 @@ struct CameraCaptureView: View {
                         if errorDesc.contains("correct format") || errorDesc.contains("JSON") {
                             errorMessage = "数据格式错误，请重试。如果问题持续，请检查 API Key 是否正确。"
                         } else if errorDesc.contains("timeout") || errorDesc.contains("timed out") {
-                            errorMessage = "请求超时，请检查网络连接后重试。"
+                            errorMessage = "请求超时（超过20秒），请检查网络连接后重试。"
                         } else {
                             errorMessage = "发生错误：\(errorDesc)"
                         }
                     }
+                    
+                    // CRITICAL: Update UI state on timeout/error
+                    // Clear placeholder and hide playback view if timeout occurred
+                    if let narrationError = error as? NarrationService.NarrationError,
+                       narrationError == .networkTimeout {
+                        if playbackData?.artworkInfo.title == "正在识别..." || playbackData?.artworkInfo.title == "正在生成讲解..." {
+                            self.playbackData = nil
+                        }
+                    }
+                    
                     isProcessing = false
                 }
             }

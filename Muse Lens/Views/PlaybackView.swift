@@ -19,7 +19,6 @@ struct PlaybackView: View {
     
     @StateObject private var artworkTTS = TTSPlayback()
     @StateObject private var artistTTS = TTSPlayback()
-    @State private var showText = false
     @State private var selectedTab = 0
     @Environment(\.dismiss) private var dismiss
     
@@ -87,20 +86,7 @@ struct PlaybackView: View {
                     artworkTTS.pause()
                 }
             }
-            .onChange(of: narration) { oldValue, newValue in
-                // Auto-play when narration becomes available (only in artwork tab)
-                if selectedTab == 0 && !newValue.isEmpty && newValue != oldValue && !isLoading {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        do {
-                            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
-                            try AVAudioSession.sharedInstance().setActive(true)
-                        } catch {
-                            print("⚠️ Audio session setup warning: \(error.localizedDescription)")
-                        }
-                        artworkTTS.speak(text: newValue, language: "zh-CN")
-                    }
-                }
-            }
+            // Removed auto-play: narration will only play when user clicks play button
             .onDisappear {
                 // Stop all playback when view disappears
                 artworkTTS.stop()
@@ -476,7 +462,11 @@ struct PlaybackView: View {
                                 tts.play()
                             } else {
                                 // Need to generate audio first
-                                tts.speak(text: text, language: "zh-CN")
+                                // Stop any existing playback before starting new one (prevent overlap)
+                                tts.stop()
+                                Task {
+                                    await tts.speak(text: text, language: "zh-CN")
+                                }
                             }
                         }
                     }
@@ -498,22 +488,6 @@ struct PlaybackView: View {
                 .disabled(tts.duration <= 0)
             }
             .padding(.vertical, 8)
-            
-            // Toggle Text View
-            Button(action: {
-                showText.toggle()
-            }) {
-                HStack {
-                    Image(systemName: showText ? "eye.slash.fill" : "eye.fill")
-                    Text(showText ? "隐藏文字" : "显示文字")
-                }
-                .font(.system(size: 16, weight: .medium))
-                .foregroundColor(.blue)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
-                .background(Color.blue.opacity(0.1))
-                .cornerRadius(8)
-            }
         }
     }
     

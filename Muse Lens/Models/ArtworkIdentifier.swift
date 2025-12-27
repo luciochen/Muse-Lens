@@ -10,7 +10,7 @@ import CommonCrypto
 
 /// Combined identifier for artworks
 /// Uses normalized title + artist to generate a unique hash identifier
-struct ArtworkIdentifier {
+struct ArtworkIdentifier: Codable {
     /// Normalized title (lowercase, trimmed, special chars removed)
     let normalizedTitle: String
     
