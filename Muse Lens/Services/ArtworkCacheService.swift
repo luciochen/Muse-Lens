@@ -476,5 +476,33 @@ private struct CachedArtwork: Codable {
     let identifier: ArtworkIdentifier
     let artwork: BackendArtwork
     let cachedAt: Date
+    let narrationLanguage: String
+    
+    enum CodingKeys: String, CodingKey {
+        case identifier
+        case artwork
+        case cachedAt
+        case narrationLanguage
+    }
+    
+    init(
+        identifier: ArtworkIdentifier,
+        artwork: BackendArtwork,
+        cachedAt: Date,
+        narrationLanguage: String = ContentLanguage.zh
+    ) {
+        self.identifier = identifier
+        self.artwork = artwork
+        self.cachedAt = cachedAt
+        self.narrationLanguage = narrationLanguage
+    }
+    
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        identifier = try c.decode(ArtworkIdentifier.self, forKey: .identifier)
+        artwork = try c.decode(BackendArtwork.self, forKey: .artwork)
+        cachedAt = try c.decode(Date.self, forKey: .cachedAt)
+        narrationLanguage = (try? c.decodeIfPresent(String.self, forKey: .narrationLanguage)) ?? ContentLanguage.zh
+    }
 }
 

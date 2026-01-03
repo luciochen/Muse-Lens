@@ -12,17 +12,32 @@ import Foundation
 /// For production, use environment variables or secure storage (Keychain)
 /// For development, you can temporarily set the API key here
 struct AppConfig {
+    private static let keychainService = "com.muselens.secrets"
+    private static let openAIKeychainAccount = "OPENAI_API_KEY"
+
     /// OpenAI API Key
     /// 
     /// Set via environment variable OPENAI_API_KEY or configure in Xcode Scheme:
     /// Product → Scheme → Edit Scheme → Run → Arguments → Environment Variables
     static var openAIApiKey: String? {
-        // Priority 1: Environment variable (recommended)
+        // Priority 0: Keychain (recommended for on-device storage)
+        if let key = KeychainHelper.readString(service: keychainService, account: openAIKeychainAccount),
+           !key.isEmpty {
+            return key
+        }
+        
+        // Priority 1: Info.plist (optional; avoid committing real keys)
+        if let key = Bundle.main.object(forInfoDictionaryKey: "OPENAI_API_KEY") as? String,
+           !key.isEmpty {
+            return key
+        }
+        
+        // Priority 2: Environment variable (works when set in Xcode Scheme)
         if let key = ProcessInfo.processInfo.environment["OPENAI_API_KEY"], !key.isEmpty {
             return key
         }
         
-        // Priority 2: UserDefaults (for development/testing only)
+        // Priority 3: UserDefaults (for development/testing only)
         // Remove this in production!
         if let key = UserDefaults.standard.string(forKey: "OPENAI_API_KEY"), !key.isEmpty {
             return key
@@ -43,6 +58,10 @@ struct AppConfig {
     /// Set API key (for development/testing only)
     /// In production, use environment variables or Keychain
     static func setAPIKey(_ key: String) {
+        // Store in Keychain (preferred)
+        _ = KeychainHelper.upsertString(key, service: keychainService, account: openAIKeychainAccount)
+        
+        // Backward-compatible: also store in UserDefaults (do NOT delete any existing keys)
         UserDefaults.standard.set(key, forKey: "OPENAI_API_KEY")
     }
     

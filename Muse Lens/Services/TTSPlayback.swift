@@ -9,6 +9,7 @@ import Foundation
 import AVFoundation
 import Combine
 import Network
+import CryptoKit
 
 /// Result of API key verification
 struct APIKeyVerificationResult {
@@ -56,8 +57,15 @@ class TTSPlayback: NSObject, ObservableObject {
     private var timeObserver: Any?
     private var synthesizer: AVSpeechSynthesizer?
     private var currentUtterance: AVSpeechUtterance?
+    // Legacy in-memory cache (kept for backward compatibility)
     private var currentText: String? // Cache current text to avoid regeneration
-    private var cachedAudioURL: URL? // Cache generated audio file
+    private var cachedAudioURL: URL? // Cache generated audio file (single-file path)
+    
+    // New: persistent hash-based cache + segmented playback
+    nonisolated private static let ttsCacheDirName = "OpenAITTSCache"
+    private var currentCacheKey: String?
+    private var currentSegmentKeys: [String] = []
+    private var pendingSegmentTasks: [Task<URL?, Never>] = []
     private var timer: Timer?
     private var startTime: Date?
     private var pausedTime: TimeInterval = 0
@@ -136,26 +144,151 @@ class TTSPlayback: NSObject, ObservableObject {
         synthesizer = AVSpeechSynthesizer()
         synthesizer?.delegate = self
     }
+
+    // MARK: - Persistent Cache (Hash-based)
+    nonisolated private static func ttsCacheDirectory() -> URL {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        let dir = base.appendingPathComponent(Self.ttsCacheDirName, isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
+        }
+        return dir
+    }
+    
+    nonisolated private static func normalizeTextForCache(_ text: String) -> String {
+        // Normalize whitespace/newlines so tiny differences don’t break cache hits.
+        var t = text
+        // Remove common status lines that sometimes leak into narration strings
+        let statusPhrases = ["正在生成", "正在识别", "分析中", "正在加载讲解内容", "正在生成讲解", "正在分析作品"]
+        for p in statusPhrases { t = t.replacingOccurrences(of: p, with: "") }
+        
+        t = t.replacingOccurrences(of: "\r\n", with: "\n")
+        // Collapse multiple newlines
+        while t.contains("\n\n\n") { t = t.replacingOccurrences(of: "\n\n\n", with: "\n\n") }
+        // Collapse multiple spaces/tabs
+        t = t.replacingOccurrences(of: "\t", with: " ")
+        while t.contains("  ") { t = t.replacingOccurrences(of: "  ", with: " ") }
+        
+        return t.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    
+    nonisolated private static func cacheKeyForOpenAITTS(
+        text: String,
+        language: String,
+        voice: String,
+        speed: Double
+    ) -> String {
+        // Include voice/speed/model/language so different settings don’t collide.
+        let normalized = normalizeTextForCache(text)
+        // IMPORTANT: generation always forces the fast model "tts-1" (see request body),
+        // so the cache key must match the actual model used to avoid false misses.
+        let raw = "\(normalized)|model=tts-1|voice=\(voice)|speed=\(String(format: "%.2f", speed))|lang=\(language)|format=mp3"
+        let digest = SHA256.hash(data: Data(raw.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+    
+    nonisolated private static func cachedFileURL(forKey key: String) -> URL {
+        ttsCacheDirectory().appendingPathComponent("\(key).mp3")
+    }
+    
+    nonisolated private static func cachedFileExists(forKey key: String) -> Bool {
+        let url = cachedFileURL(forKey: key)
+        guard FileManager.default.fileExists(atPath: url.path) else { return false }
+        // Ensure non-empty file
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let size = attrs[.size] as? NSNumber {
+            return size.intValue > 1024 // >1KB sanity check
+        }
+        return true
+    }
+    
+    // MARK: - Segmentation
+    private func splitTextForTTS(_ text: String, maxChars: Int = 420, minChars: Int = 220) -> [String] {
+        let normalized = Self.normalizeTextForCache(text)
+        guard normalized.count > maxChars else { return [normalized] }
+        
+        let boundaries: Set<Character> = ["。", "！", "？", ".", "!", "?", "\n"]
+        let chars = Array(normalized)
+        
+        var segments: [String] = []
+        var start = 0
+        var lastBoundary = -1
+        
+        for i in 0..<chars.count {
+            if boundaries.contains(chars[i]) {
+                lastBoundary = i
+            }
+            
+            let len = i - start + 1
+            if len >= maxChars {
+                let cut: Int
+                if lastBoundary >= start + minChars {
+                    cut = lastBoundary + 1
+                } else {
+                    cut = i + 1
+                }
+                let seg = String(chars[start..<cut]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !seg.isEmpty { segments.append(seg) }
+                start = cut
+                lastBoundary = -1
+            }
+        }
+        
+        if start < chars.count {
+            let tail = String(chars[start..<chars.count]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !tail.isEmpty { segments.append(tail) }
+        }
+        
+        // Final cleanup: avoid tiny trailing segments by merging
+        if segments.count >= 2, let last = segments.last, last.count < minChars {
+            segments.removeLast()
+            segments[segments.count - 1] = (segments.last ?? "") + "\n\n" + last
+        }
+        
+        return segments
+    }
     
     /// Prepare audio for text without playing (pre-generation for faster playback)
     /// This generates and caches the audio file, so when speak() is called, it can use the cached audio
     func prepareAudio(text: String, language: String = "zh-CN") async {
-        print("🎙️ Preparing audio (pre-generation) for text (\(text.count) characters)...")
+        let voiceSnapshot = ttsVoice
+        let speedSnapshot = ttsSpeed
+        let normalized = Self.normalizeTextForCache(text)
+        guard !normalized.isEmpty else { return }
         
-        // Check if we already have cached audio for this text
-        if let cachedText = currentText, cachedText == text {
-            if let cachedURL = cachedAudioURL, FileManager.default.fileExists(atPath: cachedURL.path) {
-                print("✅ Audio already prepared (cached)")
-                return
-            }
+        // Segment-first strategy: cache first segment ASAP, then cache the rest in background.
+        let segments = splitTextForTTS(normalized)
+        guard let first = segments.first else { return }
+        let segmentKeys = segments.map { Self.cacheKeyForOpenAITTS(text: $0, language: language, voice: voiceSnapshot, speed: speedSnapshot) }
+        
+        print("🎙️ Preparing audio (pre-generation) for text: \(normalized.count) chars, \(segments.count) segment(s)")
+        
+        // Only pre-generate when online + key exists; otherwise local TTS is instant anyway.
+        let networkAvailable = isNetworkAvailableQuick()
+        let hasAPIKey = getOpenAIApiKey() != nil
+        guard networkAvailable && hasAPIKey else {
+            print("📴 Skipping OpenAI pre-generation (offline/no key). Local TTS will be used.")
+            return
         }
         
-        // Generate audio without playing
-        let success = await generateAndCacheOpenAITTS(text: text, playAfterGeneration: false)
-        if success {
-            print("✅ Audio prepared successfully (ready for playback)")
+        // 1) Pre-generate first segment (highest UX impact)
+        let firstKey = segmentKeys[0]
+        if Self.cachedFileExists(forKey: firstKey) {
+            print("✅ First segment already cached")
         } else {
-            print("⚠️ Audio preparation failed (will generate on-demand when user clicks play)")
+            _ = await generateOpenAITTSAndCache(text: first, cacheKey: firstKey, shouldPlay: false)
+        }
+        
+        // 2) Pre-generate remaining segments in background
+        if segments.count > 1 {
+            let remainingSegments = Array(segments.dropFirst())
+            let remainingKeys = Array(segmentKeys.dropFirst())
+            Task.detached(priority: .utility) { [remainingSegments, remainingKeys] in
+                for (seg, key) in zip(remainingSegments, remainingKeys) {
+                    if Self.cachedFileExists(forKey: key) { continue }
+                    _ = await self.generateOpenAITTSAndCache(text: seg, cacheKey: key, shouldPlay: false)
+                }
+            }
         }
     }
     
@@ -177,7 +310,10 @@ class TTSPlayback: NSObject, ObservableObject {
             return
         }
         
-        print("🎙️ TTS speak() called for narration (\(filteredText.count) characters)")
+        let voiceSnapshot = ttsVoice
+        let speedSnapshot = ttsSpeed
+        let normalizedForCache = Self.normalizeTextForCache(filteredText)
+        print("🎙️ TTS speak() called for narration (\(normalizedForCache.count) characters)")
         
         // CRITICAL: Stop ALL playback sources BEFORE starting new one (prevent overlap and background audio)
         // This ensures no audio continues playing in the background
@@ -191,38 +327,24 @@ class TTSPlayback: NSObject, ObservableObject {
         // Optimized: Reduced from 0.1s to 0.05s for faster response
         try? await Task.sleep(nanoseconds: 50_000_000) // 0.05 seconds
         
-        // Only clear cache if text has changed
-        // This allows resuming playback without regenerating audio
-        if let cachedText = currentText, cachedText == filteredText {
-            print("✅ Text unchanged, will resume from cached audio")
-            // Don't clear cache, just resume playback
-            if let cachedURL = cachedAudioURL, FileManager.default.fileExists(atPath: cachedURL.path) {
-                print("✅ Cached audio file exists, will resume playback")
-                // Resume playback from cached file
-                Task {
-                    await MainActor.run {
-                        if !isPlaying {
-                            play()
-                        }
-                    }
-                }
+        // If we are already playing the same text, just resume.
+        if let cachedText = currentText, cachedText == normalizedForCache {
+            if self.player != nil {
+                await MainActor.run { if !isPlaying { play() } }
                 return
             }
         }
         
-        // Text changed or no cached audio, clear cache and generate new audio
-        if let cachedURL = cachedAudioURL {
-            try? FileManager.default.removeItem(at: cachedURL)
-            cachedAudioURL = nil
-            print("🗑️ Cleared cached audio file (text changed or no cache)")
-        }
-        currentText = nil
+        // Cancel any pending background segment tasks from previous playback
+        for t in pendingSegmentTasks { t.cancel() }
+        pendingSegmentTasks.removeAll()
+        currentSegmentKeys.removeAll()
         
         // Reset state
         currentTime = 0
         pausedTime = 0
         playbackError = nil
-        currentText = filteredText // Store current text (filtered)
+        currentText = normalizedForCache // Store normalized text for cache matching
         
         // Configure audio session
         do {
@@ -242,19 +364,61 @@ class TTSPlayback: NSObject, ObservableObject {
         let hasAPIKey = getOpenAIApiKey() != nil
         
         if networkAvailable && hasAPIKey {
-            // Online: Use OpenAI TTS with tts-1 model (fast mode)
-            print("🌐 Network available - Using OpenAI TTS (tts-1 fast mode)")
-            print("🚀 Starting OpenAI TTS generation task...")
+            // Online: Use OpenAI TTS with segment-first strategy
+            print("🌐 Network available - Using OpenAI TTS (segment-first, cached)")
             
-            Task {
-                let success = await generateAndPlayOpenAITTS(text: filteredText)
-                
-                if success {
-                    print("✅✅✅ OpenAI TTS (tts-1, \(ttsVoice)) SUCCESS - Natural voice is playing")
-                } else {
-                    print("❌ OpenAI TTS failed, falling back to local TTS")
-                    // Fallback to local TTS if OpenAI fails
-                    await generateAndPlayLocalTTS(text: filteredText, language: language)
+            let segments = splitTextForTTS(normalizedForCache)
+            if segments.isEmpty {
+                await generateAndPlayLocalTTS(text: normalizedForCache, language: language)
+                return
+            }
+            
+            let fullKey = Self.cacheKeyForOpenAITTS(text: normalizedForCache, language: language, voice: voiceSnapshot, speed: speedSnapshot)
+            currentCacheKey = fullKey
+            
+            // 1) Ensure first segment is ready (cache hit → instant; otherwise generate)
+            let firstSeg = segments[0]
+            let firstKey = Self.cacheKeyForOpenAITTS(text: firstSeg, language: language, voice: voiceSnapshot, speed: speedSnapshot)
+            currentSegmentKeys = segments.map { Self.cacheKeyForOpenAITTS(text: $0, language: language, voice: voiceSnapshot, speed: speedSnapshot) }
+            
+            await MainActor.run { isGenerating = true }
+            let firstURL: URL?
+            if Self.cachedFileExists(forKey: firstKey) {
+                firstURL = Self.cachedFileURL(forKey: firstKey)
+            } else {
+                firstURL = await generateOpenAITTSAndCache(text: firstSeg, cacheKey: firstKey, shouldPlay: false)
+            }
+            
+            guard let firstURLUnwrapped = firstURL else {
+                print("❌ OpenAI TTS first segment failed, falling back to local TTS")
+                await MainActor.run { isGenerating = false }
+                await generateAndPlayLocalTTS(text: normalizedForCache, language: language)
+                return
+            }
+            
+            // Start playback with a queue (first segment now, remaining added as they become ready)
+            await MainActor.run {
+                isGenerating = false
+                startQueuePlayback(firstURL: firstURLUnwrapped)
+            }
+            
+            // 2) Generate remaining segments in background and enqueue
+            if segments.count > 1 {
+                for (idx, seg) in segments.dropFirst().enumerated() {
+                    let key = currentSegmentKeys[idx + 1]
+                    let task = Task.detached(priority: .utility) { () -> URL? in
+                        if Self.cachedFileExists(forKey: key) {
+                            return Self.cachedFileURL(forKey: key)
+                        }
+                        return await self.generateOpenAITTSAndCache(text: seg, cacheKey: key, shouldPlay: false)
+                    }
+                    pendingSegmentTasks.append(task)
+                    
+                    Task { @MainActor in
+                        let url = await task.value
+                        guard let url else { return }
+                        self.enqueueNextSegment(url: url)
+                    }
                 }
             }
         } else {
@@ -267,6 +431,87 @@ class TTSPlayback: NSObject, ObservableObject {
             
             await generateAndPlayLocalTTS(text: filteredText, language: language)
         }
+    }
+
+    // MARK: - Queue playback (segment-first)
+    @MainActor
+    private func startQueuePlayback(firstURL: URL) {
+        // Stop any existing playback and observers before starting queue playback
+        stopAllPlayback()
+        
+        // Verify file exists (should, because it’s from cache)
+        guard FileManager.default.fileExists(atPath: firstURL.path) else {
+            playbackError = "音频文件不存在: \(firstURL.lastPathComponent)"
+            isPlaying = false
+            return
+        }
+        
+        print("🎵 Creating AVQueuePlayer for first segment: \(firstURL.lastPathComponent)")
+        let item = AVPlayerItem(url: firstURL)
+        self.playerItem = item
+        
+        let queue = AVQueuePlayer(items: [item])
+        self.player = queue
+        
+        // Observe item end (queue will advance automatically if more items are enqueued)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(playerDidFinishPlaying),
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: item
+        )
+        
+        // Observe status/duration for UI
+        item.addObserver(self, forKeyPath: "status", options: [.new], context: nil)
+        item.addObserver(self, forKeyPath: "duration", options: [.new], context: nil)
+        
+        // Load duration
+        Task { @MainActor in
+            await loadDuration(playerItem: item, isStreaming: false)
+        }
+        
+        // Time observer for progress updates (same approach as playAudioFile)
+        let interval = CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+        timeObserver = queue.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+            guard let self else { return }
+            guard !self.isSeeking else { return }
+            let timeSeconds = CMTimeGetSeconds(time)
+            if timeSeconds.isFinite && !timeSeconds.isNaN && !timeSeconds.isInfinite && timeSeconds >= 0 {
+                self.currentTime = timeSeconds
+                if self.isPlaying {
+                    self.pausedTime = timeSeconds
+                }
+            }
+        }
+        
+        queue.play()
+        isPlaying = true
+        currentTime = 0
+        pausedTime = 0
+        
+        print("▶️ Playing first TTS segment (queue): \(firstURL.lastPathComponent)")
+    }
+    
+    @MainActor
+    private func enqueueNextSegment(url: URL) {
+        guard let queue = self.player as? AVQueuePlayer else { return }
+        queue.insert(AVPlayerItem(url: url), after: nil)
+        print("➕ Enqueued next TTS segment: \(url.lastPathComponent)")
+    }
+
+    // MARK: - OpenAI TTS download + cache (persistent)
+    private func generateOpenAITTSAndCache(text: String, cacheKey: String, shouldPlay: Bool) async -> URL? {
+        // Note: shouldPlay is ignored here; playback handled by queue.
+        _ = shouldPlay
+        let destURL = Self.cachedFileURL(forKey: cacheKey)
+        
+        // Double-check cache (avoid duplicate generation)
+        if Self.cachedFileExists(forKey: cacheKey) {
+            return destURL
+        }
+        
+        let success = await generateAndPlayOpenAITTS(text: text, shouldPlay: false, overrideOutputURL: destURL)
+        return success ? destURL : nil
     }
     
     /// Check if device is online and can reach internet (quick check)
@@ -326,7 +571,11 @@ class TTSPlayback: NSObject, ObservableObject {
     
     /// Generate audio using OpenAI TTS API and optionally play
     /// Returns true if successful, false if failed (should fallback)
-    private func generateAndPlayOpenAITTS(text: String, shouldPlay: Bool = true) async -> Bool {
+    private func generateAndPlayOpenAITTS(
+        text: String,
+        shouldPlay: Bool = true,
+        overrideOutputURL: URL? = nil
+    ) async -> Bool {
         print("============================================================")
         print("🚀🚀🚀 Starting OpenAI TTS generation 🚀🚀🚀")
         print("🚀 Text preview: \(text.prefix(50))...")
@@ -339,10 +588,12 @@ class TTSPlayback: NSObject, ObservableObject {
             print("❌❌❌ This should NOT happen - OpenAI TTS requires API key")
             print("❌ Checking all API key sources:")
             print("   - AppConfig.openAIApiKey: \(AppConfig.openAIApiKey != nil ? "✅ found" : "❌ not found")")
+            print("     (AppConfig checks: Keychain → Info.plist → Scheme env var → UserDefaults)")
+            print("   - Info.plist OPENAI_API_KEY: \(((Bundle.main.object(forInfoDictionaryKey: "OPENAI_API_KEY") as? String)?.isEmpty == false) ? "✅ found" : "❌ not found")")
             print("   - Environment OPENAI_API_KEY: \(ProcessInfo.processInfo.environment["OPENAI_API_KEY"] != nil ? "✅ found" : "❌ not found")")
             print("   - UserDefaults OPENAI_API_KEY: \(UserDefaults.standard.string(forKey: "OPENAI_API_KEY") != nil ? "✅ found" : "❌ not found")")
             print("❌ TTS will fallback to local TTS (robotic voice)")
-            print("❌ To fix: Configure OPENAI_API_KEY environment variable or UserDefaults")
+            print("❌ To fix (recommended): set OpenAI API key via Database Test (DEBUG) or call AppConfig.setAPIKey(_:), which stores it in Keychain.")
             await MainActor.run {
                 playbackError = "OpenAI API key not configured. Please set OPENAI_API_KEY."
             }
@@ -480,8 +731,8 @@ class TTSPlayback: NSObject, ObservableObject {
             print("✅ HTTP Status: \(httpResponse.statusCode)")
             print("✅ Starting to stream audio...")
             
-            // Create temporary file for streaming
-            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp3")
+            // Output file: persistent cache (if provided) or temporary file
+            let tempURL = overrideOutputURL ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp3")
             
             // CRITICAL: Create the file first before opening it for writing
             // FileHandle(forWritingTo:) requires the file to exist
@@ -568,11 +819,10 @@ class TTSPlayback: NSObject, ObservableObject {
                 }()
                 
                 async let cacheStorage: Void = {
-                    // Store cached audio URL for this text BEFORE playing
+                    // Store cached audio URL for this text BEFORE playing (legacy single-file cache)
                     await MainActor.run {
                         cachedAudioURL = tempURL
                         currentText = text // Store text for cache matching
-                        print("✅ Cached audio URL for future use")
                     }
                 }()
                 
@@ -607,11 +857,10 @@ class TTSPlayback: NSObject, ObservableObject {
             print("✅ Total time: \(String(format: "%.2f", totalElapsed))s")
             print("✅ Audio file saved to: \(tempURL.lastPathComponent)")
             
-            // Store cached audio URL for this text
+            // Store cached audio URL for this text (legacy single-file cache)
             await MainActor.run {
                 cachedAudioURL = tempURL
                 currentText = text // Store text for cache matching
-                print("✅ Cached audio URL for future use")
             }
             
             print("✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅")
@@ -693,6 +942,8 @@ class TTSPlayback: NSObject, ObservableObject {
             print("❌ API Key not found")
             print("❌ Checking all sources:")
             print("   - AppConfig.openAIApiKey: \(AppConfig.openAIApiKey != nil ? "✅ found" : "❌ not found")")
+            print("     (AppConfig checks: Keychain → Info.plist → Scheme env var → UserDefaults)")
+            print("   - Info.plist OPENAI_API_KEY: \(((Bundle.main.object(forInfoDictionaryKey: "OPENAI_API_KEY") as? String)?.isEmpty == false) ? "✅ found" : "❌ not found")")
             print("   - Environment OPENAI_API_KEY: \(ProcessInfo.processInfo.environment["OPENAI_API_KEY"] != nil ? "✅ found" : "❌ not found")")
             print("   - UserDefaults OPENAI_API_KEY: \(UserDefaults.standard.string(forKey: "OPENAI_API_KEY") != nil ? "✅ found" : "❌ not found")")
         }
@@ -1009,9 +1260,9 @@ class TTSPlayback: NSObject, ObservableObject {
             await loadDuration(playerItem: playerItem, isStreaming: isStreaming)
         }
         
-        // Observe time updates with higher frequency for smoother progress bar
+        // Observe time updates with higher frequency for smoother progress bar and text highlighting
         // CRITICAL: Set up time observer BEFORE starting playback to ensure it's active
-        let interval = CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC)) // 10 updates per second (reduced for better performance)
+        let interval = CMTime(seconds: 0.05, preferredTimescale: CMTimeScale(NSEC_PER_SEC)) // 20 updates per second for better text sync
         timeObserver = newPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
             guard let self = self else { return }
             // Only update if not seeking (isSeeking flag prevents updates during seek operations)
@@ -1074,10 +1325,10 @@ class TTSPlayback: NSObject, ObservableObject {
         }
         
         // Ensure time observer is set up even if we're not waiting
-        // This is a safety check to ensure progress bar updates
+        // This is a safety check to ensure progress bar and text highlighting updates
         if timeObserver == nil && newPlayer.status == .readyToPlay {
             print("⚠️ Time observer was not set up, setting it up now...")
-            let interval = CMTime(seconds: 0.05, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+            let interval = CMTime(seconds: 0.05, preferredTimescale: CMTimeScale(NSEC_PER_SEC)) // 20 updates per second
             timeObserver = newPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
                 guard let self = self, !self.isSeeking else { return }
                 let timeSeconds = CMTimeGetSeconds(time)
@@ -1459,9 +1710,22 @@ class TTSPlayback: NSObject, ObservableObject {
     /// This prevents background audio from continuing when starting new playback
     private func stopAllPlayback() {
         print("🛑 Stopping all playback sources...")
+
+        // Cancel any pending segment generation tasks (prevents late enqueue + overlap)
+        for t in pendingSegmentTasks { t.cancel() }
+        pendingSegmentTasks.removeAll()
+        currentSegmentKeys.removeAll()
+        currentCacheKey = nil
         
         // Stop AVPlayer first (most common source)
         if let player = self.player {
+            // Remove time observer before clearing player reference
+            if let timeObserver = timeObserver {
+                player.removeTimeObserver(timeObserver)
+                self.timeObserver = nil
+                print("🛑 Removed time observer")
+            }
+            
             player.pause()
             player.replaceCurrentItem(with: nil) // Remove current item to fully stop
             self.player = nil // Clear reference to ensure it's fully released
@@ -1491,12 +1755,8 @@ class TTSPlayback: NSObject, ObservableObject {
             print("🛑 Cleared player item observers")
         }
         
-        // Remove time observer
-        if let timeObserver = timeObserver {
-            player?.removeTimeObserver(timeObserver)
-            self.timeObserver = nil
-            print("🛑 Removed time observer")
-        }
+        // Remove time observer (safety)
+        self.timeObserver = nil
         
         // Update state
         isPlaying = false

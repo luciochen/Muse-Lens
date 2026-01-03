@@ -1,0 +1,129 @@
+"app.name" = "MuseLens";
+
+// Home / Camera
+"home.tagline" = "拍一眼，就懂艺术";
+"home.cta.capture" = "拍摄艺术品";
+"home.status.recognizing" = "正在识别中...";
+"home.action.retry" = "重试";
+"home.nav.history" = "历史记录";
+"home.nav.db_test" = "数据库测试";
+
+"camera.error.preview_mode" = "预览模式下无法使用相机功能，请在模拟器或真机上运行";
+"camera.error.photo_library_unsupported" = "设备不支持照片库";
+
+// Common errors (camera/narration)
+"error.openai_api_key_missing" = "API Key 未配置。请在 Xcode Scheme 中设置 OPENAI_API_KEY 环境变量。";
+"error.network_config_invalid" = "网络请求配置错误";
+"error.openai_api_key_invalid" = "API Key 无效。请检查 OPENAI_API_KEY 是否正确。";
+"error.openai_api_key_invalid_or_expired" = "API Key 无效或已过期。请检查 OPENAI_API_KEY。";
+"error.check_network_retry" = "请检查网络连接后重试";
+"error.narration_generation_failed_fmt" = "生成讲解失败：%@";
+"error.invalid_response_retry" = "讲解生成服务返回了无效的响应，请重试";
+"error.image_processing_failed_retry" = "图片处理失败，请重试";
+"error.request_timed_out_retry" = "请求超时（超过20秒）。请检查网络连接后重试。";
+"error.network_unavailable" = "网络不可用。请检查您的网络连接。";
+"error.rate_limited" = "请求过于频繁，请稍后再试。";
+"error.api_error_code_message_fmt" = "API 错误 (%d): %@";
+"error.api_error_code_retry_fmt" = "API 错误 (%d)，请重试。";
+"error.data_format_retry" = "数据格式错误，请重试。如果问题持续，请检查 API Key 是否正确。";
+"error.generic_fmt" = "发生错误：%@";
+
+// Playback
+"nav.back" = "返回";
+"playback.state.recognizing_title" = "正在识别...";
+"playback.section.artist_intro" = "艺术家介绍";
+"playback.empty" = "暂无内容";
+"playback.recognition_failed.title" = "无法识别作品";
+"playback.recognition_failed.no_narration" = "未生成讲解内容";
+"playback.status.generating_narration" = "正在生成作品讲解...";
+"playback.tts.generating_audio_guide" = "正在生成语音讲解...";
+"playback.tts.ready_to_play" = "已准备播放...";
+
+// Artist Detail
+"artist.detail.no_info" = "暂无艺术家介绍";
+"artist.detail.no_info_unidentified" = "艺术家未识别，暂无介绍";
+"artist.detail.not_identified" = "艺术家信息未确认";
+
+// Confidence levels
+"playback.confidence.high" = "识别成功";
+"playback.confidence.medium" = "识别不确定";
+"playback.confidence.low" = "无法识别";
+
+// Search
+"search.title" = "搜索结果";
+"search.action.done" = "完成";
+"search.empty.title" = "未找到结果";
+"search.empty.subtitle" = "请尝试其他关键词";
+
+// History
+"history.title" = "历史记录";
+"history.action.clear" = "清除";
+"history.empty.title" = "暂无历史记录";
+"history.empty.subtitle" = "识别作品后，记录会显示在这里";
+"history.confidence.high" = "高确定性";
+"history.confidence.medium" = "中确定性";
+"history.confidence.low" = "低确定性";
+
+// Database test
+"dbtest.title" = "数据库测试";
+"dbtest.section.openai" = "OpenAI 配置（本地保存，不会提交到 Git）";
+"dbtest.section.backend" = "后端配置";
+"dbtest.section.actions" = "测试功能";
+"dbtest.section.stats" = "统计信息";
+"dbtest.section.results" = "测试结果";
+
+"dbtest.openai.key.placeholder" = "OpenAI API Key";
+"dbtest.openai.key.save" = "保存 OpenAI Key";
+
+"dbtest.backend.url.placeholder" = "Backend URL";
+"dbtest.backend.key.placeholder" = "Backend API Key";
+"dbtest.backend.save" = "保存配置";
+
+"dbtest.action.run_full_qa" = "运行完整QA测试";
+"dbtest.action.test_connection" = "测试连接";
+"dbtest.action.test_query_artwork" = "测试查询作品";
+"dbtest.action.test_save_artwork" = "测试保存作品";
+"dbtest.action.test_query_artist" = "测试查询艺术家";
+"dbtest.action.get_stats" = "获取统计信息";
+
+"dbtest.openai.configured" = "OpenAI Key 已配置（Keychain/UserDefaults）";
+"dbtest.openai.missing" = "OpenAI Key 未配置（会导致 TTS/讲解不可用）";
+"dbtest.backend.configured" = "后端已配置";
+"dbtest.backend.missing" = "后端未配置";
+"dbtest.testing" = "测试中...";
+"dbtest.count.artworks" = "作品数量";
+"dbtest.count.artists" = "艺术家数量";
+
+// Database test - results (UI strings)
+"dbtest.result.config_save.name" = "配置保存";
+"dbtest.result.config_save.message" = "配置已保存";
+"dbtest.result.openai_key_save.name" = "OpenAI Key 保存";
+"dbtest.result.openai_key_save.message" = "已保存到本地（Keychain）";
+
+"dbtest.result.connection.name" = "连接测试";
+"dbtest.result.connection.success" = "连接成功";
+"dbtest.result.connection.failure" = "连接失败";
+"dbtest.result.connection.backend_missing" = "后端未配置";
+
+"dbtest.result.artwork_query.name" = "查询作品测试";
+"dbtest.result.artwork_query.found_fmt" = "找到作品: %@ by %@";
+"dbtest.result.artwork_query.not_found" = "未找到作品（这是正常的，如果数据库中还没有该作品）";
+"dbtest.result.artwork_query.failed" = "查询失败";
+
+"dbtest.result.artwork_save.name" = "保存作品测试";
+"dbtest.result.artwork_save.success" = "作品保存成功";
+"dbtest.result.artwork_save.failed" = "保存失败";
+
+"dbtest.result.artist_query.name" = "查询艺术家测试";
+"dbtest.result.artist_query.found_fmt" = "找到艺术家: %@";
+"dbtest.result.artist_query.not_found" = "未找到艺术家（这是正常的，如果数据库中还没有该艺术家）";
+"dbtest.result.artist_query.failed" = "查询失败";
+
+"dbtest.result.get_stats.name" = "获取统计信息";
+"dbtest.result.get_stats.failed" = "获取失败";
+"dbtest.result.qa_test.name" = "QA测试";
+"dbtest.result.qa_test.running" = "正在运行QA测试...";
+"dbtest.result.qa_test.summary" = "QA测试总结";
+"dbtest.result.qa_test.summary_fmt" = "通过: %d/%d";
+
+

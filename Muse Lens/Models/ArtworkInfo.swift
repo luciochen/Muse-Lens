@@ -101,24 +101,92 @@ struct HistoryItem: Codable, Identifiable {
     let artworkInfo: ArtworkInfo
     let narration: String
     let artistIntroduction: String? // 艺术家介绍
+    let narrationLanguage: String // e.g. "zh" (future: "en")
     let confidence: Double? // 识别置信度
     let timestamp: Date
-    let userPhotoData: Data? // Compressed user photo
+    let userPhotoPath: String? // File path to user photo (stored in file system, not UserDefaults)
+    
+    // Legacy support: old format had userPhotoData
+    // NOTE: This exists only for decoding/migration of legacy history records.
+    // It is intentionally NOT encoded (see encode(to:)).
+    // Must be readable by HistoryService for migration.
+    let userPhotoData: Data?
+    
+    // Computed property to load photo data from file system
+    var photoData: Data? {
+        if let photoPath = userPhotoPath {
+            return try? Data(contentsOf: URL(fileURLWithPath: photoPath))
+        }
+        // Fallback to legacy data if path is nil but old data exists
+        return userPhotoData
+    }
+    
+    enum CodingKeys: String, CodingKey {
+        case id
+        case artworkInfo
+        case narration
+        case artistIntroduction
+        case narrationLanguage
+        case confidence
+        case timestamp
+        case userPhotoPath
+        case userPhotoData // For backward compatibility when decoding
+    }
     
     init(
         artworkInfo: ArtworkInfo,
         narration: String,
         artistIntroduction: String? = nil,
+        narrationLanguage: String = ContentLanguage.zh,
         confidence: Double? = nil,
-        userPhotoData: Data? = nil
+        userPhotoPath: String? = nil,
+        userPhotoData: Data? = nil // For temporary use during migration
     ) {
         self.id = UUID()
         self.artworkInfo = artworkInfo
         self.narration = narration
         self.artistIntroduction = artistIntroduction
+        self.narrationLanguage = narrationLanguage
         self.confidence = confidence
         self.timestamp = Date()
-        self.userPhotoData = userPhotoData
+        self.userPhotoPath = userPhotoPath
+        self.userPhotoData = userPhotoData // Only for backward compatibility
+    }
+    
+    // Custom decoder to handle both old and new formats
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        artworkInfo = try container.decode(ArtworkInfo.self, forKey: .artworkInfo)
+        narration = try container.decode(String.self, forKey: .narration)
+        artistIntroduction = try container.decodeIfPresent(String.self, forKey: .artistIntroduction)
+        narrationLanguage = (try? container.decodeIfPresent(String.self, forKey: .narrationLanguage)) ?? ContentLanguage.zh
+        confidence = try container.decodeIfPresent(Double.self, forKey: .confidence)
+        timestamp = try container.decode(Date.self, forKey: .timestamp)
+        
+        // Try to decode new format first (userPhotoPath)
+        if let path = try? container.decodeIfPresent(String.self, forKey: .userPhotoPath) {
+            userPhotoPath = path
+            userPhotoData = nil
+        } else {
+            // Fallback to old format (userPhotoData)
+            userPhotoPath = nil
+            userPhotoData = try container.decodeIfPresent(Data.self, forKey: .userPhotoData)
+        }
+    }
+    
+    // Custom encoder - only encode userPhotoPath, not userPhotoData
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(artworkInfo, forKey: .artworkInfo)
+        try container.encode(narration, forKey: .narration)
+        try container.encodeIfPresent(artistIntroduction, forKey: .artistIntroduction)
+        try container.encode(narrationLanguage, forKey: .narrationLanguage)
+        try container.encodeIfPresent(confidence, forKey: .confidence)
+        try container.encode(timestamp, forKey: .timestamp)
+        try container.encodeIfPresent(userPhotoPath, forKey: .userPhotoPath)
+        // Do NOT encode userPhotoData - it should be migrated to file system
     }
 }
 

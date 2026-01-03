@@ -95,7 +95,7 @@ struct BackendArtwork: Codable {
     /// CRITICAL: imageUrl should ONLY be from museum API (reference image), NEVER user's photo
     /// - imageUrl: Reference image from museum collection API (e.g., Met Museum, Art Institute)
     /// - User's personal photos are NEVER stored in backend
-    /// - User's photos are only stored locally in history (HistoryItem.userPhotoData)
+    /// - User's photos are only stored locally in history (HistoryItem.userPhotoPath, saved to file system)
     /// - When displaying, PlaybackView always prioritizes userImage over artworkInfo.imageURL
     static func from(
         narrationResponse: NarrationResponse,

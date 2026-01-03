@@ -20,10 +20,10 @@ struct HistoryView: View {
                         Image(systemName: "clock.arrow.circlepath")
                             .font(.system(size: 60))
                             .foregroundColor(.secondary)
-                        Text("暂无历史记录")
+                        Text("history.empty.title")
                             .font(.system(size: 18))
                             .foregroundColor(.secondary)
-                        Text("识别作品后，记录会显示在这里")
+                        Text("history.empty.subtitle")
                             .font(.system(size: 14))
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.center)
@@ -43,11 +43,11 @@ struct HistoryView: View {
                 }
             }
             .listStyle(.plain)
-            .navigationTitle("历史记录")
+            .navigationTitle("history.title")
             .toolbar {
                 if !history.isEmpty {
                     ToolbarItem(placement: .navigationBarTrailing) {
-                        Button("清除") {
+                        Button("history.action.clear") {
                             HistoryService.shared.clearHistory()
                             loadHistory()
                         }
@@ -63,7 +63,8 @@ struct HistoryView: View {
                 artworkInfo: item.artworkInfo,
                 narration: item.narration,
                 artistIntroduction: item.artistIntroduction ?? "",
-                userImage: item.userPhotoData.flatMap { UIImage(data: $0) },
+                narrationLanguage: item.narrationLanguage,
+                userImage: HistoryService.shared.loadPhotoData(for: item).flatMap { UIImage(data: $0) },
                 confidence: item.confidence
             )
         }
@@ -81,6 +82,14 @@ struct HistoryView: View {
     }
     
     private func deleteHistoryItems(at offsets: IndexSet) {
+        // Delete photo files for items being removed
+        for index in offsets {
+            let item = history[index]
+            if let photoPath = item.userPhotoPath {
+                try? FileManager.default.removeItem(atPath: photoPath)
+            }
+        }
+        
         var updatedHistory = history
         updatedHistory.remove(atOffsets: offsets)
         
@@ -98,8 +107,8 @@ struct HistoryRow: View {
     
     var body: some View {
         HStack(spacing: 12) {
-            // Thumbnail
-            if let photoData = item.userPhotoData,
+            // Thumbnail - load from file system via HistoryService
+            if let photoData = HistoryService.shared.loadPhotoData(for: item),
                let image = UIImage(data: photoData) {
                 Image(uiImage: image)
                     .resizable()
@@ -131,7 +140,7 @@ struct HistoryRow: View {
                     // Confidence badge (if available)
                     if let confidence = item.confidence {
                         let level: RecognitionConfidenceLevel = confidence >= 0.8 ? .high : (confidence >= 0.5 ? .medium : .low)
-                        Text(level == .high ? "高确定性" : (level == .medium ? "中确定性" : "低确定性"))
+                        Text(level == .high ? String(localized: "history.confidence.high") : (level == .medium ? String(localized: "history.confidence.medium") : String(localized: "history.confidence.low")))
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(level == .high ? .green : (level == .medium ? .orange : .red))
                             .padding(.horizontal, 6)

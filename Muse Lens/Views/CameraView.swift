@@ -16,20 +16,28 @@ struct PlaybackData: Identifiable {
     let artworkInfo: ArtworkInfo
     let narration: String
     let artistIntroduction: String
+    let narrationLanguage: String
     let userImage: UIImage?
     let confidence: Double?
     
     init(
+        id: UUID = UUID(),
         artworkInfo: ArtworkInfo,
         narration: String,
         artistIntroduction: String = "",
+        narrationLanguage: String = ContentLanguage.zh,
         userImage: UIImage? = nil,
         confidence: Double? = nil
     ) {
-        self.id = artworkInfo.id // Use artworkInfo.id to ensure uniqueness
+        // IMPORTANT:
+        // This id must remain stable while we update `playbackData` during generation.
+        // If we tie it to `artworkInfo.id`, every ArtworkInfo rebuild creates a new UUID,
+        // causing fullScreenCover(item:) to dismiss + re-present (appears as “jumping back home”).
+        self.id = id
         self.artworkInfo = artworkInfo
         self.narration = narration
         self.artistIntroduction = artistIntroduction
+        self.narrationLanguage = narrationLanguage
         self.userImage = userImage
         self.confidence = confidence
     }
@@ -135,142 +143,88 @@ struct CameraCaptureView: View {
     
     var body: some View {
         ZStack {
-            Color(.systemBackground)
+            // Background: Image with dark overlay
+            Image("HomeBgImage")
+                .resizable()
+                .scaledToFill()
                 .ignoresSafeArea()
             
-            VStack(spacing: 30) {
-                // App Title
-                VStack(spacing: 8) {
-                    Text("MuseLens")
-                        .font(.system(size: 36, weight: .bold))
-                        .foregroundColor(.primary)
-                    
-                    Text("拍一眼，就懂艺术")
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundColor(.secondary)
-                }
-                .padding(.top, 60)
+            Color.black.opacity(0.5)
+                .ignoresSafeArea()
+            
+            VStack(spacing: 40) {
+                // App Logo
+                Image("AppLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(height: 110)
+                    .shadow(color: .black.opacity(0.2), radius: 8, y: 4)
+                    .padding(.top, 180)
                 
-                // Search Bar - Temporarily hidden
-                // HStack {
-                //     Image(systemName: "magnifyingglass")
-                //         .foregroundColor(.secondary)
-                //     
-                //     TextField("搜索作品或艺术家", text: $searchText)
-                //         .textFieldStyle(PlainTextFieldStyle())
-                //         .onSubmit {
-                //             performSearch()
-                //         }
-                //     
-                //     if !searchText.isEmpty {
-                //         Button(action: {
-                //             searchText = ""
-                //             searchResults = []
-                //             showSearchResults = false
-                //         }) {
-                //             Image(systemName: "xmark.circle.fill")
-                //                 .foregroundColor(.secondary)
-                //         }
-                //     }
-                //     
-                //     if isSearching {
-                //         ProgressView()
-                //             .scaleEffect(0.8)
-                //     } else if !searchText.isEmpty {
-                //         Button(action: {
-                //             performSearch()
-                //         }) {
-                //             Text("搜索")
-                //                 .font(.system(size: 14, weight: .medium))
-                //                 .foregroundColor(.blue)
-                //         }
-                //     }
-                // }
-                // .padding()
-                // .background(Color(.systemGray6))
-                // .cornerRadius(12)
-                // .padding(.horizontal)
-                // .padding(.top, 8)
+                Spacer()
                 
-                // Database Test Button (Development)
-                #if DEBUG
+                // Camera Button - White circle with #1F1F1F icon/text
                 Button(action: {
-                    showDatabaseTest = true
+                    checkCameraPermission()
                 }) {
-                    Image(systemName: "checkmark.shield.fill")
-                        .font(.system(size: 24))
-                        .foregroundColor(.blue)
-                        .padding()
-                }
-                #endif
-                
-                HStack(spacing: 16) {
-                    // Database Test Button (Development only)
-                    #if DEBUG
-                    Button(action: {
-                        showDatabaseTest = true
-                    }) {
-                        HStack {
-                            Image(systemName: "checkmark.shield.fill")
-                            Text("数据库测试")
-                        }
-                        .font(.system(size: 16))
-                        .foregroundColor(.green)
+                    VStack(spacing: 12) {
+                        Image(systemName: "camera.fill")
+                            .font(.system(size: 50))
+                            .foregroundColor(Color(hex: "1F1F1F"))
+                        
+                        Text("home.cta.capture")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(Color(hex: "1F1F1F"))
                     }
-                    #endif
-                    
+                    .frame(width: 160, height: 160)
+                    .background(
+                        Circle()
+                            .fill(Color.white)
+                    )
+                    .shadow(color: .black.opacity(0.15), radius: 12, y: 6)
+                }
+                .disabled(isProcessing)
+                .opacity(isProcessing ? 0.6 : 1.0)
+                
+                // Navigation Buttons - Tertiary style (white text, no background)
+                // Vertically stacked below camera button
+                VStack(spacing: 24) {
                     // History Button
                     Button(action: {
                         showHistory = true
                     }) {
-                        HStack {
+                        HStack(spacing: 8) {
                             Image(systemName: "clock.arrow.circlepath")
-                            Text("历史记录")
+                            Text("home.nav.history")
                         }
-                        .font(.system(size: 16))
-                        .foregroundColor(.blue)
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(.white)
                     }
-                }
-                .padding(.top, 8)
-                
-                Spacer()
-                
-                // Camera Button
-                Button(action: {
-                    checkCameraPermission()
-                }) {
-                    VStack(spacing: 16) {
-                        Image(systemName: "camera.fill")
-                            .font(.system(size: 60))
-                            .foregroundColor(.white)
-                        
-                        Text("拍摄艺术品")
-                            .font(.system(size: 20, weight: .semibold))
-                            .foregroundColor(.white)
+                    
+                    #if DEBUG
+                    // Database Test Button (Development only)
+                    Button(action: {
+                        showDatabaseTest = true
+                    }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark.shield.fill")
+                            Text("home.nav.db_test")
+                        }
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(.white)
                     }
-                    .frame(width: 200, height: 200)
-                    .background(
-                        Circle()
-                            .fill(
-                                LinearGradient(
-                                    colors: [Color.blue, Color.purple],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                    )
-                    .shadow(color: .black.opacity(0.2), radius: 20, x: 0, y: 10)
+                    #endif
                 }
-                .disabled(isProcessing)
-                .opacity(isProcessing ? 0.6 : 1.0)
+                .padding(.top, 20)
                 
                 if isProcessing {
                     VStack(spacing: 12) {
                         ProgressView()
                             .scaleEffect(1.5)
-                        Text("正在识别中...")
+                            .tint(.white)
+                        Text("home.status.recognizing")
                             .font(.system(size: 16))
-                            .foregroundColor(.secondary)
+                            .foregroundColor(.white.opacity(0.9))
                     }
                     .padding(.top, 20)
                 }
@@ -279,7 +233,7 @@ struct CameraCaptureView: View {
                     VStack(spacing: 12) {
                         Text(error)
                             .font(.system(size: 14))
-                            .foregroundColor(.red)
+                            .foregroundColor(.white)
                             .multilineTextAlignment(.center)
                         
                         if lastCapturedImage != nil {
@@ -288,27 +242,30 @@ struct CameraCaptureView: View {
                                     processImage(image)
                                 }
                             }) {
-                                HStack {
+                                HStack(spacing: 8) {
                                     Image(systemName: "arrow.clockwise")
-                                    Text("重试")
+                                    Text("home.action.retry")
                                 }
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 24)
-                                .padding(.vertical, 10)
-                                .background(Color.blue)
-                                .cornerRadius(8)
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundColor(Color(hex: "1F1F1F"))
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 12)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .fill(Color.white)
+                                )
                             }
                         }
                     }
                     .padding()
-                    .background(Color.red.opacity(0.1))
-                    .cornerRadius(8)
+                    .background(Color.red.opacity(0.25))
+                    .cornerRadius(12)
                     .padding(.horizontal)
                 }
                 
                 Spacer()
             }
+            .padding(.horizontal, 20)
         }
         .sheet(isPresented: $showCamera) {
             CameraView(capturedImage: $capturedImage, isPresented: $showCamera)
@@ -318,6 +275,7 @@ struct CameraCaptureView: View {
                 artworkInfo: data.artworkInfo,
                 narration: data.narration,
                 artistIntroduction: data.artistIntroduction,
+                narrationLanguage: data.narrationLanguage,
                 userImage: data.userImage,
                 confidence: data.confidence
             )
@@ -376,8 +334,10 @@ struct CameraCaptureView: View {
                         let narrationResponse = try await NarrationService.shared.generateNarrationFromImage(imageBase64: imageBase64)
                         
                         await MainActor.run {
+                            let sessionId = self.playbackData?.id ?? UUID()
                             let artworkInfo = narrationResponse.toArtworkInfo(imageURL: artwork.imageURL, recognized: true)
                             self.playbackData = PlaybackData(
+                                id: sessionId,
                                 artworkInfo: artworkInfo,
                                 narration: narrationResponse.narration,
                                 artistIntroduction: narrationResponse.artistIntroduction ?? "",
@@ -394,6 +354,7 @@ struct CameraCaptureView: View {
             
             // Fallback: Create simple narration based on artwork info
             await MainActor.run {
+                let sessionId = self.playbackData?.id ?? UUID()
                 let narration = """
                 这是\(artwork.title)，由\(artwork.artist)创作。
                 \(artwork.year.map { "创作于\($0)年。" } ?? "")
@@ -403,6 +364,7 @@ struct CameraCaptureView: View {
                 """
                 
                 self.playbackData = PlaybackData(
+                    id: sessionId,
                     artworkInfo: artwork,
                     narration: narration,
                     artistIntroduction: "",
@@ -418,7 +380,7 @@ struct CameraCaptureView: View {
         #if DEBUG
         if ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1" {
             // In preview mode, don't try to access camera
-            errorMessage = "预览模式下无法使用相机功能，请在模拟器或真机上运行"
+            errorMessage = String(localized: "camera.error.preview_mode")
             return
         }
         #endif
@@ -429,7 +391,7 @@ struct CameraCaptureView: View {
         if UIImagePickerController.isSourceTypeAvailable(.photoLibrary) {
             showCamera = true
         } else {
-            errorMessage = "设备不支持照片库"
+            errorMessage = String(localized: "camera.error.photo_library_unsupported")
         }
         return
         #endif
@@ -437,7 +399,7 @@ struct CameraCaptureView: View {
         // On real device, check camera availability and permissions
         // First check if photo library is available (always fallback option)
         guard UIImagePickerController.isSourceTypeAvailable(.photoLibrary) else {
-            errorMessage = "设备不支持照片库"
+            errorMessage = String(localized: "camera.error.photo_library_unsupported")
             return
         }
         
@@ -488,7 +450,7 @@ struct CameraCaptureView: View {
                 // Check API key configuration
                 guard AppConfig.isConfigured else {
                     await MainActor.run {
-                        errorMessage = "API Key 未配置。请在 Xcode Scheme 中设置 OPENAI_API_KEY 环境变量。"
+                        errorMessage = String(localized: "error.openai_api_key_missing")
                         isProcessing = false
                     }
                     return
@@ -550,13 +512,15 @@ struct CameraCaptureView: View {
                 // Immediately show playback view with skeleton loading
                 // Create placeholder artwork info for skeleton loading
                 let placeholderInfo = ArtworkInfo(
-                    title: "正在识别...",
-                    artist: "分析中",
+                    title: UIPlaceholders.recognizingTitleToken,
+                    artist: "",
                     recognized: false
                 )
                 
                 await MainActor.run {
+                    let sessionId = self.playbackData?.id ?? UUID()
                     self.playbackData = PlaybackData(
+                        id: sessionId,
                         artworkInfo: placeholderInfo,
                         narration: "",
                         artistIntroduction: "",
@@ -599,6 +563,7 @@ struct CameraCaptureView: View {
                     
                     // OPTIMIZATION: Incremental display - update UI with quick identification results
                     await MainActor.run {
+                        let sessionId = self.playbackData?.id ?? UUID()
                         let artworkInfo = ArtworkInfo(
                             title: ArtworkIdentifier.cleanTitle(id.title),
                             artist: id.artist,
@@ -606,8 +571,9 @@ struct CameraCaptureView: View {
                             recognized: true
                         )
                         self.playbackData = PlaybackData(
+                            id: sessionId,
                             artworkInfo: artworkInfo,
-                            narration: "正在加载讲解内容...",
+                            narration: UIPlaceholders.narrationLoadingToken,
                             artistIntroduction: "",
                             userImage: capturedImage,
                             confidence: nil
@@ -712,38 +678,18 @@ struct CameraCaptureView: View {
                     
                     // OPTIMIZATION: Incremental display - update UI to show "正在生成讲解..."
                     await MainActor.run {
+                        let sessionId = self.playbackData?.id ?? UUID()
                         let currentData = self.playbackData
                         let currentInfo = currentData?.artworkInfo
-                        let artworkInfo: ArtworkInfo
-                        if let currentInfo = currentInfo {
-                            if currentInfo.title == "正在识别..." || currentInfo.title.isEmpty {
-                                // Create new ArtworkInfo with updated title (struct is immutable)
-                                artworkInfo = ArtworkInfo(
-                                    title: "正在生成讲解...",
-                                    artist: currentInfo.artist,
-                                    year: currentInfo.year,
-                                    style: currentInfo.style,
-                                    medium: currentInfo.medium,
-                                    museum: currentInfo.museum,
-                                    sources: currentInfo.sources,
-                                    imageURL: currentInfo.imageURL,
-                                    recognized: currentInfo.recognized
-                                )
-                            } else {
-                                // Keep existing artworkInfo
-                                artworkInfo = currentInfo
-                            }
-                        } else {
-                            // Create placeholder if artworkInfo is nil
-                            artworkInfo = ArtworkInfo(
-                                title: "正在生成讲解...",
-                                artist: "分析中",
-                                recognized: false
-                            )
-                        }
+                        let artworkInfo: ArtworkInfo = currentInfo ?? ArtworkInfo(
+                            title: UIPlaceholders.recognizingTitleToken,
+                            artist: "",
+                            recognized: false
+                        )
                         self.playbackData = PlaybackData(
+                            id: sessionId,
                             artworkInfo: artworkInfo,
-                            narration: "正在分析作品并生成详细讲解...",
+                            narration: UIPlaceholders.narrationGeneratingToken,
                             artistIntroduction: currentData?.artistIntroduction ?? "",
                             userImage: capturedImage,
                             confidence: currentData?.confidence
@@ -773,18 +719,10 @@ struct CameraCaptureView: View {
                                 print("⚠️ Generation taking longer than expected: \(String(format: "%.2f", elapsed))s")
                             }
                             
-                            // Update narration text progressively as it's generated
-                            Task { @MainActor in
-                                if let currentData = self.playbackData {
-                                    self.playbackData = PlaybackData(
-                                        artworkInfo: currentData.artworkInfo,
-                                        narration: partialText,
-                                        artistIntroduction: currentData.artistIntroduction,
-                                        userImage: currentData.userImage,
-                                        confidence: currentData.confidence
-                                    )
-                                }
-                            }
+                            // IMPORTANT:
+                            // Streaming response is JSON; showing it makes the UI display “...json...”.
+                            // Keep skeleton/loading text until we have the final parsed NarrationResponse.
+                            _ = partialText
                         }
                         
                         // Check total timeout after streaming generation
@@ -836,6 +774,7 @@ struct CameraCaptureView: View {
                     
                     // OPTIMIZATION: Update UI with final structured data
                     await MainActor.run {
+                        let sessionId = self.playbackData?.id ?? UUID()
                         let artworkInfo = ArtworkInfo(
                             title: ArtworkIdentifier.cleanTitle(generatedNarrationResponse.title),
                             artist: generatedNarrationResponse.artist,
@@ -845,14 +784,17 @@ struct CameraCaptureView: View {
                         )
                         // Narration text is already updated progressively via streaming
                         // But ensure final version is set
+                        // CRITICAL: Use stable sessionId to prevent view dismissal/re-presentation
                         self.playbackData = PlaybackData(
+                            id: sessionId,
                             artworkInfo: artworkInfo,
                             narration: generatedNarrationResponse.narration,
                             artistIntroduction: self.playbackData?.artistIntroduction ?? "",
+                            narrationLanguage: ContentLanguage.zh,
                             userImage: capturedImage,
                             confidence: generatedNarrationResponse.confidence
                         )
-                        print("✅ Updated UI with final AI-generated data")
+                        print("✅ Updated UI with final AI-generated data (stable ID: \(sessionId))")
                     }
                     
                     // Use cache service to get artwork narration (may save to backend)
@@ -863,6 +805,24 @@ struct CameraCaptureView: View {
                         narrationResponse: generatedNarrationResponse,
                         artworkInfo: nil // Will be set after verification
                     ) ?? generatedNarrationResponse
+                    
+                    // Update UI with artist introduction if available
+                    if let artistIntro = narrationResponse?.artistIntroduction, !artistIntro.isEmpty {
+                        await MainActor.run {
+                            if let currentData = self.playbackData {
+                                self.playbackData = PlaybackData(
+                                    id: currentData.id,
+                                    artworkInfo: currentData.artworkInfo,
+                                    narration: currentData.narration,
+                                    artistIntroduction: artistIntro,
+                                    narrationLanguage: currentData.narrationLanguage,
+                                    userImage: currentData.userImage,
+                                    confidence: currentData.confidence
+                                )
+                                print("✅ Updated UI with artist introduction (\(artistIntro.count) characters)")
+                            }
+                        }
+                    }
                 }
                 
                 guard var finalNarrationResponse = narrationResponse else {
@@ -1070,6 +1030,7 @@ struct CameraCaptureView: View {
                     artworkInfo: finalArtworkInfo,
                     narration: finalNarrationResponse.narration,
                     artistIntroduction: finalNarrationResponse.artistIntroduction,
+                    narrationLanguage: ContentLanguage.zh,
                     confidence: finalNarrationResponse.confidence,
                     userPhotoData: image.jpegData(compressionQuality: 0.5)
                 )
@@ -1081,14 +1042,17 @@ struct CameraCaptureView: View {
                 print("⏱️ Total processing time: \(String(format: "%.2f", totalElapsed))s")
                 
                 await MainActor.run {
+                    let sessionId = self.playbackData?.id ?? UUID()
                     // Update playback view with final data
                     // CRITICAL: User's photo (capturedImage) is preserved and will always be displayed
                     // Backend imageURL is only a reference from museum API, NOT user's photo
                     // PlaybackView prioritizes userImage over artworkInfo.imageURL
                     self.playbackData = PlaybackData(
+                        id: sessionId,
                         artworkInfo: finalArtworkInfo,
                         narration: finalNarrationResponse.narration,
                         artistIntroduction: finalNarrationResponse.artistIntroduction ?? "",
+                        narrationLanguage: ContentLanguage.zh,
                         userImage: capturedImage,
                         confidence: finalNarrationResponse.confidence
                     )
@@ -1106,7 +1070,10 @@ struct CameraCaptureView: View {
                         print("🎙️ Pre-generating TTS audio for narration (\(fullText.count) characters)...")
                         // Pre-generate audio (but don't play it yet)
                         // The speak() function will check for cached audio and use it if available
-                        await TTSPlayback.shared.prepareAudio(text: fullText, language: "zh-CN")
+                        await TTSPlayback.shared.prepareAudio(
+                            text: fullText,
+                            language: ContentLanguage.ttsBCP47Tag(for: ContentLanguage.zh)
+                        )
                         print("✅ TTS audio pre-generation completed")
                     }
                 }
@@ -1120,52 +1087,53 @@ struct CameraCaptureView: View {
                     if let narrationError = error as? NarrationService.NarrationError {
                         switch narrationError {
                         case .apiKeyMissing:
-                            errorMessage = "API Key 未配置。请在 Xcode Scheme 中设置 OPENAI_API_KEY 环境变量。"
+                            errorMessage = String(localized: "error.openai_api_key_missing")
                         case .invalidURL:
-                            errorMessage = "网络请求配置错误"
+                            errorMessage = String(localized: "error.network_config_invalid")
                         case .apiRequestFailed(let details):
                             if let details = details, details.contains("API key") || details.contains("401") {
-                                errorMessage = "API Key 无效。请检查 OPENAI_API_KEY 是否正确。"
+                                errorMessage = String(localized: "error.openai_api_key_invalid")
                             } else {
-                                errorMessage = "生成讲解失败：\(details ?? "请检查网络连接后重试")"
+                                let detailsText = details ?? String(localized: "error.check_network_retry")
+                                errorMessage = String(format: String(localized: "error.narration_generation_failed_fmt"), detailsText)
                             }
                         case .invalidResponse:
-                            errorMessage = "讲解生成服务返回了无效的响应，请重试"
+                            errorMessage = String(localized: "error.invalid_response_retry")
                         case .imageProcessingFailed:
-                            errorMessage = "图片处理失败，请重试"
+                            errorMessage = String(localized: "error.image_processing_failed_retry")
                         case .networkTimeout:
-                            errorMessage = "请求超时（超过20秒）。请检查网络连接后重试。"
+                            errorMessage = String(localized: "error.request_timed_out_retry")
                         case .networkUnavailable:
-                            errorMessage = "网络不可用。请检查您的网络连接。"
+                            errorMessage = String(localized: "error.network_unavailable")
                         case .apiError(let code, let message):
                             if code == 401 {
-                                errorMessage = "API Key 无效或已过期。请检查 OPENAI_API_KEY。"
+                                errorMessage = String(localized: "error.openai_api_key_invalid_or_expired")
                             } else if code == 429 {
-                                errorMessage = "请求过于频繁，请稍后再试。"
+                                errorMessage = String(localized: "error.rate_limited")
                             } else if let message = message {
-                                errorMessage = "API 错误 (\(code)): \(message)"
+                                errorMessage = String(format: String(localized: "error.api_error_code_message_fmt"), code, message)
                             } else {
-                                errorMessage = "API 错误 (\(code))，请重试。"
+                                errorMessage = String(format: String(localized: "error.api_error_code_retry_fmt"), code)
                             }
                         }
                     } else {
                         let errorDesc = error.localizedDescription
                         if errorDesc.contains("correct format") || errorDesc.contains("JSON") {
-                            errorMessage = "数据格式错误，请重试。如果问题持续，请检查 API Key 是否正确。"
+                            errorMessage = String(localized: "error.data_format_retry")
                         } else if errorDesc.contains("timeout") || errorDesc.contains("timed out") {
-                            errorMessage = "请求超时（超过20秒），请检查网络连接后重试。"
+                            errorMessage = String(localized: "error.request_timed_out_retry")
                         } else {
-                            errorMessage = "发生错误：\(errorDesc)"
+                            errorMessage = String(format: String(localized: "error.generic_fmt"), errorDesc)
                         }
                     }
                     
-                    // CRITICAL: Update UI state on timeout/error
-                    // Clear placeholder and hide playback view if timeout occurred
-                    if let narrationError = error as? NarrationService.NarrationError,
-                       narrationError == .networkTimeout {
-                        if playbackData?.artworkInfo.title == "正在识别..." || playbackData?.artworkInfo.title == "正在生成讲解..." {
-                            self.playbackData = nil
-                        }
+                    // CRITICAL: Update UI state on error
+                    // Don't dismiss playback view on timeout - keep it showing with error message
+                    // Only show error message, but keep the view visible
+                    if let narrationError = error as? NarrationService.NarrationError {
+                        // Keep playbackData visible - don't set to nil
+                        // Error message will be shown in errorMessage state
+                        print("⚠️ Error occurred but keeping playback view visible: \(narrationError)")
                     }
                     
                     isProcessing = false
@@ -1177,43 +1145,56 @@ struct CameraCaptureView: View {
 
 #Preview {
     // Preview without camera access to avoid crashes
-    VStack(spacing: 30) {
-        VStack(spacing: 8) {
-            Text("MuseLens")
-                .font(.system(size: 36, weight: .bold))
-            Text("拍一眼，就懂艺术")
-                .font(.system(size: 18, weight: .medium))
-                .foregroundColor(.secondary)
-        }
-        .padding(.top, 60)
+    ZStack {
+        // Background: Dark gray to simulate the dark overlay
+        Color.gray.opacity(0.3)
+            .ignoresSafeArea()
         
-        Spacer()
-        
-        VStack(spacing: 16) {
-            Image(systemName: "camera.fill")
-                .font(.system(size: 60))
-                .foregroundColor(.white)
+        VStack(spacing: 40) {
+            // App Title
+            VStack(spacing: 8) {
+                Text("app.name")
+                    .font(.system(size: 36, weight: .bold))
+                    .foregroundColor(.white)
+                Text("home.tagline")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundColor(.white.opacity(0.9))
+            }
+            .padding(.top, 60)
             
-            Text("拍摄艺术品")
-                .font(.system(size: 20, weight: .semibold))
+            Spacer()
+            
+            // Camera Button
+            VStack(spacing: 12) {
+                Image(systemName: "camera.fill")
+                    .font(.system(size: 50))
+                    .foregroundColor(Color(hex: "1F1F1F"))
+                
+                Text("home.cta.capture")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(Color(hex: "1F1F1F"))
+            }
+            .frame(width: 160, height: 160)
+            .background(
+                Circle()
+                    .fill(Color.white)
+            )
+            .shadow(color: .black.opacity(0.15), radius: 12, y: 6)
+            
+            // Navigation Buttons - Tertiary style (white text, no background)
+            VStack(spacing: 16) {
+                HStack(spacing: 8) {
+                    Image(systemName: "clock.arrow.circlepath")
+                    Text("home.nav.history")
+                }
+                .font(.system(size: 16, weight: .medium))
                 .foregroundColor(.white)
+            }
+            .padding(.top, 20)
+            
+            Spacer()
         }
-        .frame(width: 200, height: 200)
-        .background(
-            Circle()
-                .fill(
-                    LinearGradient(
-                        colors: [Color.blue, Color.purple],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-        )
-        .shadow(color: .black.opacity(0.2), radius: 20, x: 0, y: 10)
-        
-        Spacer()
+        .padding(.horizontal, 20)
     }
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .background(Color(.systemBackground))
 }
 

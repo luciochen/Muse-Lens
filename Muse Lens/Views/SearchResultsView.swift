@@ -22,10 +22,10 @@ struct SearchResultsView: View {
                         Image(systemName: "magnifyingglass")
                             .font(.system(size: 60))
                             .foregroundColor(.secondary)
-                        Text("未找到结果")
+                        Text("search.empty.title")
                             .font(.system(size: 18))
                             .foregroundColor(.secondary)
-                        Text("请尝试其他关键词")
+                        Text("search.empty.subtitle")
                             .font(.system(size: 14))
                             .foregroundColor(.secondary)
                     }
@@ -42,11 +42,11 @@ struct SearchResultsView: View {
                     .listStyle(PlainListStyle())
                 }
             }
-            .navigationTitle("搜索结果")
+            .navigationTitle("search.title")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("完成") {
+                    Button("search.action.done") {
                         dismiss()
                     }
                 }

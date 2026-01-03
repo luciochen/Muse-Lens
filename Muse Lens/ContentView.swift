@@ -16,9 +16,9 @@ struct ContentView: View {
 #Preview {
     // Use a simple preview that doesn't require camera access
     VStack {
-        Text("MuseLens")
+        Text("app.name")
             .font(.system(size: 36, weight: .bold))
-        Text("拍一眼，就懂艺术")
+        Text("home.tagline")
             .font(.system(size: 18, weight: .medium))
             .foregroundColor(.secondary)
     }

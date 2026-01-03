@@ -14,18 +14,47 @@ struct PlaybackView: View {
     let artworkInfo: ArtworkInfo
     let narration: String
     let artistIntroduction: String
+    let narrationLanguage: String
     let userImage: UIImage?
     let confidence: Double? // Optional confidence value
     
     @StateObject private var artworkTTS = TTSPlayback()
-    @StateObject private var artistTTS = TTSPlayback()
-    @State private var selectedTab = 0
     @Environment(\.dismiss) private var dismiss
+    @State private var showFullScreenImage = false
+    @State private var showArtistDetail = false
     
     // Check if we're in loading state
     // Only show loading when we truly have placeholder data
     private var isLoading: Bool {
-        artworkInfo.title == "正在识别..." && narration.isEmpty
+        let title = artworkInfo.title
+        let isRecognizingTitle =
+            (title == UIPlaceholders.recognizingTitleToken) ||
+            (title == UIPlaceholders.legacyRecognizingTitleZh)
+        return isRecognizingTitle && narration.isEmpty
+    }
+
+    private var isNarrationPending: Bool {
+        let trimmed = narration.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return true }
+        // Placeholder states used during incremental UI updates (tokens + legacy strings)
+        if trimmed == UIPlaceholders.narrationLoadingToken { return true }
+        if trimmed == UIPlaceholders.narrationGeneratingToken { return true }
+        if trimmed == UIPlaceholders.legacyNarrationLoadingZh { return true }
+        if trimmed == UIPlaceholders.legacyNarrationGeneratingZh { return true }
+        if trimmed == UIPlaceholders.legacyNarrationGeneratingShortZh { return true }
+        // If streaming JSON/SSE accidentally leaks into UI, treat as loading instead of showing gibberish.
+        if trimmed.hasPrefix("{") { return true }
+        if trimmed.contains("\"title\"") || trimmed.contains("\"narration\"") || trimmed.contains("\"artist\"") { return true }
+        if trimmed.contains("data:") { return true }
+        return false
+    }
+    
+    private var displayTitle: String {
+        let title = artworkInfo.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if title == UIPlaceholders.recognizingTitleToken || title == UIPlaceholders.legacyRecognizingTitleZh {
+            return String(localized: "playback.state.recognizing_title")
+        }
+        return title
     }
     
     // Get confidence level
@@ -41,299 +70,326 @@ struct PlaybackView: View {
     }
     
     var body: some View {
-        ZStack {
-            // Background to prevent overlap
-            Color(.systemBackground)
+        return ZStack {
+            // CRITICAL: Ensure background fully covers the screen
+            // Add solid black background first as base layer
+            Color.black
                 .ignoresSafeArea()
             
-            VStack(spacing: 0) {
-                // Header with artwork image and info
-                headerView
-                
-                // Tab View
-                TabView(selection: $selectedTab) {
-                    // Tab 1: 作品讲解
-                    artworkNarrationTab
-                        .tag(0)
+            backgroundImageView
+                .ignoresSafeArea()
+            
+            GeometryReader { geometry in
+                VStack(spacing: 0) {
+                    // Fixed header (1:1 layout block)
+                    headerView
+                        .padding(.top, geometry.safeAreaInsets.top + 4)
+                        .padding(.bottom, 6)
                     
-                    // Tab 2: 艺术家介绍
-                    artistIntroductionTab
-                        .tag(1)
+                    // Middle scrollable area (only this scrolls)
+                    scrollableContentView
+                        .frame(maxHeight: .infinity)
+                    
+                    // Fixed bottom player
+                    fixedAudioPlayerView
+                        .padding(.bottom, geometry.safeAreaInsets.bottom + 6)
                 }
-                .tabViewStyle(.page(indexDisplayMode: .never))
+                // IMPORTANT:
+                // Apply padding BEFORE frame(maxWidth: .infinity). If we frame first and then pad,
+                // the container becomes wider than the screen (width + 40pt) and content gets clipped.
+                .padding(.horizontal, 20)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top) // Fill screen space
             }
-            .safeAreaInset(edge: .top) {
-                // Top bar with close button
-                HStack {
-                    Spacer()
-                    Button(action: {
-                        dismiss()
-                    }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 28))
-                            .foregroundColor(.secondary)
-                            .padding()
-                    }
+        }
+        .onDisappear { artworkTTS.stop() }
+        .contentShape(Rectangle())
+        // Swipe RIGHT (from left edge) to go back to home (dismiss).
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 24, coordinateSpace: .local)
+                .onEnded { value in
+                    let dx = value.translation.width
+                    let dy = value.translation.height
+                    // horizontal swipe only
+                    guard abs(dx) > abs(dy) else { return }
+                    // Require edge-start to avoid accidental triggers while scrolling
+                    guard value.startLocation.x < 24 else { return }
+                    // swipe right
+                    guard dx > 90 else { return }
+                    dismiss()
                 }
-                .background(Color(.systemBackground))
+        )
+        .sheet(isPresented: $showFullScreenImage) {
+            if let userImage = userImage {
+                FullScreenImageView(image: userImage)
             }
-            .onChange(of: selectedTab) { oldValue, newValue in
-                // Pause (not stop) the other tab's playback when switching tabs
-                // This preserves the playback state for resume
-                if newValue == 0 {
-                    artistTTS.pause()
-                } else {
-                    artworkTTS.pause()
-                }
-            }
-            // Removed auto-play: narration will only play when user clicks play button
-            .onDisappear {
-                // Stop all playback when view disappears
-                artworkTTS.stop()
-                artistTTS.stop()
-            }
+        }
+        .sheet(isPresented: $showArtistDetail) {
+            ArtistDetailView(
+                artistName: artworkInfo.artist,
+                artistIntroduction: artistIntroduction,
+                isIdentified: artworkInfo.recognized && artworkInfo.artist != "未知艺术家" && !artworkInfo.artist.isEmpty
+            )
         }
     }
     
-    // MARK: - Header View
-    private var headerView: some View {
-        VStack(spacing: 16) {
-            // Artwork Image
-            // IMPORTANT: Always prioritize user's photo over backend reference image
-            // Backend imageURL is only a reference from museum API, not user's personal photo
-            Group {
+    // MARK: - Background Image View
+    private var backgroundImageView: some View {
+        // CRITICAL:
+        // When `userImage` is present, an unconstrained resizable Image in a ZStack can
+        // participate in layout sizing and cause the container to exceed screen bounds.
+        // Constrain to screen size via GeometryReader and always clip.
+        return GeometryReader { geometry in
+            ZStack {
                 if let userImage = userImage {
-                    // Always use user's photo first (user's personal photo of the artwork)
                     Image(uiImage: userImage)
                         .resizable()
-                        .aspectRatio(contentMode: .fit)
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .clipped()
+                        .blur(radius: 50)
                 } else if let imageURL = artworkInfo.imageURL, let url = URL(string: imageURL) {
-                    // Fallback to reference image from museum API (only if user photo not available)
-                    // This is a reference image, not user's photo
                     AsyncImage(url: url) { phase in
-                        switch phase {
-                        case .success(let image):
+                        if case .success(let image) = phase {
                             image
                                 .resizable()
-                                .aspectRatio(contentMode: .fit)
-                        case .failure(_), .empty:
-                            imagePlaceholder
-                        @unknown default:
-                            imagePlaceholder
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: geometry.size.width, height: geometry.size.height)
+                                .clipped()
+                                .blur(radius: 50)
+                        } else {
+                            Color.black
                         }
                     }
                 } else {
-                    imagePlaceholder
+                    Color.black
                 }
+                
+                Color.black.opacity(0.6)
             }
-            .frame(maxHeight: 250)
-            .cornerRadius(12)
-            .shadow(radius: 8)
-            .padding(.horizontal)
-            
-            // Artwork Info
-            VStack(alignment: .leading, spacing: 12) {
-                if isLoading {
-                    // Skeleton loading for header
-                    VStack(alignment: .leading, spacing: 8) {
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.gray.opacity(0.2))
-                            .frame(height: 24)
-                            .shimmer()
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.gray.opacity(0.15))
-                            .frame(width: 180, height: 18)
-                            .shimmer()
+            .ignoresSafeArea()
+        }
+    }
+    
+    // MARK: - Header (Fixed)
+    private var headerView: some View {
+        return VStack(alignment: .leading, spacing: 10) {
+            // Top row: Back button - Tertiary style (white text, no background)
+            HStack {
+                Button(action: { dismiss() }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 16, weight: .semibold))
+                        Text("nav.back")
+                            .font(.system(size: 15, weight: .semibold))
                     }
-                } else {
-                    Text(artworkInfo.title)
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundColor(.primary)
-                    
-                    HStack {
-                        Text(artworkInfo.artist)
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundColor(.secondary)
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 8)
+                }
+                
+                Spacer()
+            }
+            
+            // Artwork header row
+            HStack(alignment: .top, spacing: 12) {
+                headerThumbnailView
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    if isLoading {
+                        VStack(alignment: .leading, spacing: 8) {
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.white.opacity(0.28))
+                                .frame(height: 22)
+                                .shimmer()
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.white.opacity(0.18))
+                                .frame(height: 18)
+                                .frame(maxWidth: 180, alignment: .leading)
+                                .shimmer()
+                        }
+                    } else {
+                        Text(displayTitle)
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundColor(.white)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
                         
-                        if let year = artworkInfo.year {
-                            Text("· \(year)")
-                                .font(.system(size: 18))
-                                .foregroundColor(.secondary)
+                        // Artist name - tappable
+                        Text(headerSubtitle)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.white.opacity(0.75))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .underline()
+                            .onTapGesture {
+                                if !artworkInfo.artist.isEmpty && artworkInfo.artist != "未知艺术家" {
+                                    showArtistDetail = true
+                                }
+                            }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var headerSubtitle: String {
+        if let year = artworkInfo.year, !year.isEmpty {
+            return "\(artworkInfo.artist) · \(year)"
+        }
+        return artworkInfo.artist
+    }
+
+    /// Thumbnail (always visible). If no image, show placeholder with border.
+    private var headerThumbnailView: some View {
+        let size: CGFloat = 44 // Match design
+        return Group {
+            if let userImage = userImage {
+                Image(uiImage: userImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else if let imageURL = artworkInfo.imageURL, let url = URL(string: imageURL) {
+                AsyncImage(url: url) { phase in
+                    if case .success(let image) = phase {
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    } else {
+                        thumbnailPlaceholder
+                    }
+                }
+            } else {
+                thumbnailPlaceholder
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .shadow(color: Color.black.opacity(0.35), radius: 8, x: 0, y: 6)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.75), lineWidth: 1)
+        )
+        .onTapGesture {
+            if userImage != nil {
+                showFullScreenImage = true
+            }
+        }
+    }
+
+    private var thumbnailPlaceholder: some View {
+        return ZStack {
+            Color.white.opacity(0.30)
+            Image(systemName: "photo")
+                .font(.system(size: 20, weight: .bold))
+                .foregroundColor(.white.opacity(0.95))
+        }
+    }
+    
+    // MARK: - Scrollable Content View (Text Only, No Audio Controls)
+    private var scrollableContentView: some View {
+        return ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 18) {
+                if isLoading {
+                    skeletonLoadingView()
+                        .padding(.vertical, 8)
+                } else {
+                    // Artwork narration/introduction should always render (even when pending)
+                    VStack(alignment: .leading, spacing: 16) {
+                        if let level = confidenceLevel, level == .low {
+                            // Low confidence: show friendly message
+                            VStack(spacing: 16) {
+                                Image(systemName: "questionmark.circle.fill")
+                                    .font(.system(size: 64))
+                                    .foregroundColor(.white.opacity(0.6))
+                                
+                                Text("playback.recognition_failed.title")
+                                    .font(.system(size: 20, weight: .bold))
+                                    .foregroundColor(.white)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                
+                                Text(narration.isEmpty ? String(localized: "playback.recognition_failed.no_narration") : narration)
+                                    .font(.system(size: 16))
+                                    .foregroundColor(.white.opacity(0.8))
+                                    .multilineTextAlignment(.center)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 12)
+                                    .background(Color.white.opacity(0.25))
+                                    .cornerRadius(12)
+                            }
+                            .frame(maxWidth: .infinity)
+                        } else if isNarrationPending {
+                            // Pending narration: show a simple text placeholder (always visible)
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack(spacing: 10) {
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle(tint: .blue))
+                                    Text("playback.status.generating_narration")
+                                        .font(.system(size: 16, weight: .medium))
+                                        .foregroundColor(.white.opacity(0.85))
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(Color.white.opacity(0.12))
+                                    .frame(height: 18)
+                                    .shimmer()
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(Color.white.opacity(0.10))
+                                    .frame(height: 18)
+                                    .frame(maxWidth: 260, alignment: .leading)
+                                    .shimmer()
+                            }
+                            .padding(.vertical, 8)
+                        } else {
+                            // Normal narration rendering
+                            narrationTextView(text: narration, isLoading: false, tts: artworkTTS)
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 8)
                     
-                    if let style = artworkInfo.style {
-                        Text(style)
-                            .font(.system(size: 16))
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(Color.blue.opacity(0.1))
-                            .cornerRadius(8)
-                    }
-                    
-                    // Confidence level indicator - only show for medium/low confidence
-                    if let level = confidenceLevel, level != .high {
-                        confidenceIndicator(level: level)
+                    // Artist Introduction (if available)
+                    if !artistIntroduction.isEmpty {
+                        VStack(alignment: .leading, spacing: 16) {
+                            Rectangle()
+                                .fill(Color.white.opacity(0.3))
+                                .frame(height: 1)
+                                .padding(.top, 8)
+                            
+                            Text("playback.section.artist_intro")
+                                .font(.system(size: 22, weight: .bold))
+                                .foregroundColor(.white)
+                                .fixedSize(horizontal: false, vertical: true)
+                            
+                            Text(artistIntroduction)
+                                .font(.system(size: 17))
+                                .foregroundColor(.white.opacity(0.9))
+                                .lineSpacing(8)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 8)
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal)
-            
-            // Tab Selector
-            HStack(spacing: 0) {
-                tabButton(title: "作品讲解", tag: 0)
-                tabButton(title: "艺术家介绍", tag: 1)
-            }
-            .padding(.horizontal)
-            .padding(.bottom, 8)
+            .padding(.top, 10)
+            .padding(.bottom, 20)
         }
-        .padding(.top, 8)
-        .background(Color(.systemBackground))
+        .frame(maxWidth: .infinity) // Fill available width
     }
     
-    private func tabButton(title: String, tag: Int) -> some View {
-        Button(action: {
-            withAnimation {
-                selectedTab = tag
-            }
-        }) {
-            VStack(spacing: 4) {
-                Text(title)
-                    .font(.system(size: 16, weight: selectedTab == tag ? .semibold : .regular))
-                    .foregroundColor(selectedTab == tag ? .blue : .secondary)
-                
-                Rectangle()
-                    .fill(selectedTab == tag ? Color.blue : Color.clear)
-                    .frame(height: 2)
-            }
-            .frame(maxWidth: .infinity)
+    // MARK: - Fixed Audio Player View
+    private var fixedAudioPlayerView: some View {
+        return VStack(spacing: 0) {
+            audioControlsView(tts: artworkTTS, text: narration)
+                .padding(.horizontal, 0)
+                .padding(.vertical, 10) // tighter vertical spacing
         }
-    }
-    
-    // MARK: - Artwork Narration Tab
-    private var artworkNarrationTab: some View {
-        ScrollView {
-            VStack(spacing: 24) {
-                if isLoading {
-                    // Skeleton loading - show only when truly loading
-                    skeletonLoadingView()
-                        .padding()
-                } else if !narration.isEmpty {
-                    // Show actual content when available
-                    // Show different content based on confidence level
-                    if let level = confidenceLevel {
-                        switch level {
-                        case .high:
-                            // High confidence: Show full narration with audio controls
-                            audioControlsView(tts: artworkTTS, text: narration)
-                            narrationTextView(text: narration, isLoading: false, tts: artworkTTS)
-                            
-                        case .medium:
-                            // Medium confidence: Show style description with disclaimer
-                            VStack(alignment: .leading, spacing: 12) {
-                                HStack {
-                                    Image(systemName: "info.circle.fill")
-                                        .foregroundColor(.orange)
-                                    Text("识别不确定")
-                                        .font(.system(size: 16, weight: .semibold))
-                                        .foregroundColor(.orange)
-                                }
-                                .padding()
-                                .background(Color.orange.opacity(0.1))
-                                .cornerRadius(8)
-                                
-                                audioControlsView(tts: artworkTTS, text: narration)
-                                narrationTextView(text: narration, isLoading: false, tts: artworkTTS)
-                            }
-                            
-                        case .low:
-                            // Low confidence: Show friendly message
-                            VStack(spacing: 16) {
-                                Image(systemName: "questionmark.circle.fill")
-                                    .font(.system(size: 64))
-                                    .foregroundColor(.gray)
-                                
-                                Text("无法识别作品")
-                                    .font(.system(size: 20, weight: .bold))
-                                    .foregroundColor(.primary)
-                                
-                                Text(narration)
-                                    .font(.system(size: 16))
-                                    .foregroundColor(.secondary)
-                                    .multilineTextAlignment(.center)
-                                    .padding()
-                                    .background(Color(.systemGray6))
-                                    .cornerRadius(12)
-                                
-                                VStack(spacing: 8) {
-                                    Text("建议：")
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .foregroundColor(.secondary)
-                                    Text("• 尝试重新扫描作品")
-                                    Text("• 确保作品清晰可见")
-                                    Text("• 尝试扫描其他作品")
-                                }
-                                .font(.system(size: 14))
-                                .foregroundColor(.secondary)
-                            }
-                            .padding()
-                        }
-                    } else {
-                        // Default: Show narration
-                        audioControlsView(tts: artworkTTS, text: narration)
-                        narrationTextView(text: narration, isLoading: false, tts: artworkTTS)
-                    }
-                } else {
-                    // Empty state - no content available
-                    VStack(spacing: 16) {
-                        Image(systemName: "doc.text")
-                            .font(.system(size: 48))
-                            .foregroundColor(.secondary)
-                        Text("暂无内容")
-                            .font(.system(size: 16))
-                            .foregroundColor(.secondary)
-                    }
-                    .padding()
-                }
-            }
-            .padding()
-        }
-    }
-    
-    // MARK: - Artist Introduction Tab
-    private var artistIntroductionTab: some View {
-        ScrollView {
-            VStack(spacing: 24) {
-                if isLoading {
-                    // Show skeleton loading when loading
-                    skeletonLoadingView()
-                        .padding()
-                } else if artistIntroduction.isEmpty {
-                    // Empty state
-                    VStack(spacing: 12) {
-                        Image(systemName: "person.crop.circle.badge.questionmark")
-                            .font(.system(size: 48))
-                            .foregroundColor(.secondary)
-                        Text("暂无艺术家介绍")
-                            .font(.system(size: 16))
-                            .foregroundColor(.secondary)
-                        Text("无法识别艺术家信息")
-                            .font(.system(size: 14))
-                            .foregroundColor(.secondary)
-                    }
-                    .padding()
-                } else {
-                    // Audio Controls
-                    audioControlsView(tts: artistTTS, text: artistIntroduction)
-                    
-                    // Artist Introduction Text
-                    narrationTextView(text: artistIntroduction, isLoading: false, tts: artistTTS)
-                }
-            }
-            .padding()
-        }
+        .frame(maxWidth: .infinity)
     }
     
     // MARK: - Skeleton Loading View
@@ -343,22 +399,22 @@ struct PlaybackView: View {
             VStack(spacing: 16) {
                 // Progress bar skeleton
                 RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.gray.opacity(0.15))
+                    .fill(Color.white.opacity(0.2))
                     .frame(height: 4)
                     .shimmer()
                 
                 // Control buttons skeleton
                 HStack(spacing: 40) {
                     Circle()
-                        .fill(Color.gray.opacity(0.15))
+                        .fill(Color.white.opacity(0.2))
                         .frame(width: 24, height: 24)
                         .shimmer()
                     Circle()
-                        .fill(Color.gray.opacity(0.15))
+                        .fill(Color.white.opacity(0.2))
                         .frame(width: 60, height: 60)
                         .shimmer()
                     Circle()
-                        .fill(Color.gray.opacity(0.15))
+                        .fill(Color.white.opacity(0.2))
                         .frame(width: 24, height: 24)
                         .shimmer()
                 }
@@ -366,7 +422,7 @@ struct PlaybackView: View {
                 
                 // Toggle button skeleton
                 RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.gray.opacity(0.1))
+                    .fill(Color.white.opacity(0.15))
                     .frame(width: 120, height: 36)
                     .shimmer()
             }
@@ -376,9 +432,9 @@ struct PlaybackView: View {
                 ForEach(0..<6, id: \.self) { index in
                     HStack(spacing: 8) {
                         RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.gray.opacity(0.15))
+                            .fill(Color.white.opacity(0.2))
                             .frame(height: 20)
-                            .frame(width: index % 3 == 0 ? 280 : (index % 3 == 1 ? 240 : 200))
+                            .frame(maxWidth: index % 3 == 0 ? 280 : (index % 3 == 1 ? 240 : 200))
                             .shimmer()
                         if index % 3 != 2 {
                             Spacer()
@@ -393,9 +449,9 @@ struct PlaybackView: View {
     private func narrationTextView(text: String, isLoading: Bool, tts: TTSPlayback? = nil) -> some View {
         Group {
             if text.isEmpty && !isLoading {
-                Text("暂无内容")
+                Text("playback.empty")
                     .font(.system(size: 16))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.white.opacity(0.6))
                     .italic()
                     .padding()
             } else {
@@ -405,23 +461,27 @@ struct PlaybackView: View {
                 HighlightedTextView(
                     paragraphs: paragraphs,
                     text: text,
-                    tts: tts
+                    tts: tts,
+                    textColor: .white,
+                    secondaryTextColor: .white.opacity(0.7),
+                    highlightColor: Color(hex: "1F1F1F")
                 )
+                .frame(maxWidth: .infinity, alignment: .leading) // Ensure it respects parent width constraints
             }
         }
     }
     
     // MARK: - Audio Controls View
     private func audioControlsView(tts: TTSPlayback, text: String) -> some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 10) { // tighter spacing
             // Progress Bar
             if tts.isGenerating {
                 VStack(spacing: 8) {
                     ProgressView()
                         .progressViewStyle(CircularProgressViewStyle(tint: .blue))
-                    Text("正在生成高质量语音...")
+                    Text("playback.tts.generating_audio_guide")
                         .font(.system(size: 12))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.white.opacity(0.7))
                 }
             } else if tts.duration > 0 {
                 ProgressSliderView(tts: tts)
@@ -429,13 +489,13 @@ struct PlaybackView: View {
                 VStack(spacing: 8) {
                     ProgressView()
                         .progressViewStyle(LinearProgressViewStyle(tint: .blue))
-                    Text("准备播放...")
+                    Text("playback.tts.ready_to_play")
                         .font(.system(size: 12))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.white.opacity(0.7))
                 }
             }
             
-            // Control Buttons
+            // Control Buttons - White bg with #1F1F1F icons
             HStack(spacing: 40) {
                 // Skip Back 15s
                 Button(action: {
@@ -443,7 +503,12 @@ struct PlaybackView: View {
                 }) {
                     Image(systemName: "gobackward.15")
                         .font(.system(size: 24))
-                        .foregroundColor(tts.duration > 0 ? .blue : .gray)
+                        .foregroundColor(tts.duration > 0 ? Color(hex: "1F1F1F") : .gray)
+                        .padding(12)
+                        .background(
+                            Circle()
+                                .fill(tts.duration > 0 ? Color.white : Color.white.opacity(0.3))
+                        )
                 }
                 .disabled(tts.duration <= 0)
                 
@@ -454,10 +519,18 @@ struct PlaybackView: View {
                     } else {
                         // Resume or start playback
                         if !text.isEmpty && !tts.isGenerating {
-                            // Check if we have cached audio or player is already set up
-                            // If player exists, just resume playback
-                            // Otherwise, generate and play audio
-                            if tts.duration > 0 || tts.currentTime > 0 {
+                            // Check if playback has finished (at the end or stopped after completion)
+                            let isAtEnd = tts.duration > 0 && (tts.currentTime >= (tts.duration - 0.5) || (!tts.isPlaying && tts.currentTime >= tts.duration * 0.95))
+                            
+                            if isAtEnd {
+                                // Restart from beginning if at the end
+                                print("🔄 Restarting playback from beginning")
+                                tts.seek(to: 0)
+                                // Small delay to ensure seek completes
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                    tts.play()
+                                }
+                            } else if tts.duration > 0 || tts.currentTime > 0 {
                                 // Already have audio, just resume
                                 tts.play()
                             } else {
@@ -465,7 +538,7 @@ struct PlaybackView: View {
                                 // Stop any existing playback before starting new one (prevent overlap)
                                 tts.stop()
                                 Task {
-                                    await tts.speak(text: text, language: "zh-CN")
+                                    await tts.speak(text: text, language: ContentLanguage.ttsBCP47Tag(for: narrationLanguage))
                                 }
                             }
                         }
@@ -473,7 +546,12 @@ struct PlaybackView: View {
                 }) {
                     Image(systemName: tts.isPlaying ? "pause.circle.fill" : "play.circle.fill")
                         .font(.system(size: 60))
-                        .foregroundColor((text.isEmpty || tts.isGenerating) ? .gray : .blue)
+                        .foregroundColor((text.isEmpty || tts.isGenerating) ? .gray : Color(hex: "1F1F1F"))
+                        .background(
+                            Circle()
+                                .fill((text.isEmpty || tts.isGenerating) ? Color.white.opacity(0.3) : Color.white)
+                                .frame(width: 68, height: 68)
+                        )
                 }
                 .disabled(text.isEmpty || tts.isGenerating)
                 
@@ -483,16 +561,21 @@ struct PlaybackView: View {
                 }) {
                     Image(systemName: "goforward.15")
                         .font(.system(size: 24))
-                        .foregroundColor(tts.duration > 0 ? .blue : .gray)
+                        .foregroundColor(tts.duration > 0 ? Color(hex: "1F1F1F") : .gray)
+                        .padding(12)
+                        .background(
+                            Circle()
+                                .fill(tts.duration > 0 ? Color.white : Color.white.opacity(0.3))
+                        )
                 }
                 .disabled(tts.duration <= 0)
             }
-            .padding(.vertical, 8)
+            .padding(.vertical, 4)
         }
     }
     
     private var imagePlaceholder: some View {
-        RoundedRectangle(cornerRadius: 12)
+        return RoundedRectangle(cornerRadius: 12)
             .fill(Color(.systemGray5))
             .overlay(
                 Image(systemName: "photo.artframe")
@@ -560,14 +643,14 @@ struct PlaybackView: View {
     private func confidenceIndicator(level: RecognitionConfidenceLevel) -> some View {
         HStack {
             Image(systemName: level == .high ? "checkmark.circle.fill" : level == .medium ? "exclamationmark.circle.fill" : "questionmark.circle.fill")
-                .foregroundColor(level == .high ? .green : level == .medium ? .orange : .gray)
-            Text(level == .high ? "识别成功" : level == .medium ? "识别不确定" : "无法识别")
+                .foregroundColor(level == .high ? .green : level == .medium ? .orange : .white.opacity(0.7))
+            Text(level == .high ? String(localized: "playback.confidence.high") : level == .medium ? String(localized: "playback.confidence.medium") : String(localized: "playback.confidence.low"))
                 .font(.system(size: 14, weight: .medium))
-                .foregroundColor(level == .high ? .green : level == .medium ? .orange : .gray)
+                .foregroundColor(level == .high ? .green : level == .medium ? .orange : .white.opacity(0.9))
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background((level == .high ? Color.green : level == .medium ? Color.orange : Color.gray).opacity(0.1))
+        .background((level == .high ? Color.green : level == .medium ? Color.orange : Color.white).opacity(0.2))
         .cornerRadius(8)
     }
 }
@@ -619,11 +702,11 @@ struct ProgressSliderView: View {
             HStack {
                 Text(formatTime(tts.currentTime))
                     .font(.system(size: 12))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.white.opacity(0.7))
                 Spacer()
                 Text(formatTime(tts.duration))
                     .font(.system(size: 12))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.white.opacity(0.7))
             }
         }
         .onChange(of: tts.currentTime) { oldValue, newValue in
@@ -651,7 +734,7 @@ struct ProgressSliderView: View {
 // Shimmer effect for skeleton loading
 extension View {
     func shimmer() -> some View {
-        self.modifier(ShimmerModifier())
+        return self.modifier(ShimmerModifier())
     }
 }
 
@@ -659,7 +742,7 @@ struct ShimmerModifier: ViewModifier {
     @State private var phase: CGFloat = 0
     
     func body(content: Content) -> some View {
-        content
+        return content
             .overlay(
                 GeometryReader { geometry in
                     LinearGradient(
@@ -688,17 +771,47 @@ struct ShimmerModifier: ViewModifier {
     }
 }
 
-#Preview {
+#Preview("iPhone 15 Pro") {
     PlaybackView(
         artworkInfo: ArtworkInfo(
-            title: "示例作品",
-            artist: "示例艺术家",
-            year: "2023",
-            style: "印象派",
-            sources: ["https://example.com"]
+            title: "Water lilies in Claude Monet’s private garden in France",
+            artist: "Claude Monet",
+            year: "1872",
+            style: "Impressionism",
+            sources: ["https://en.wikipedia.org/wiki/Water_Lilies_(Monet_series)"]
         ),
-        narration: "这是一段示例讲解内容，用于展示播放界面的效果。",
-        artistIntroduction: "这是艺术家介绍内容，包括艺术家的生平、风格特点和在艺术史上的地位。",
+        narration: """
+印象派的兴起，打破了学院派对于光影与色彩的刻板规范。莫奈以更自由的笔触与大胆的色彩层次，捕捉瞬间的空气感与光线变化，形成一种更接近人眼真实感受的画面语言。
+
+在这类作品中，水面既是镜子也是舞台：它反射天空与植物，同时又被涟漪与笔触重新组织成抽象的节奏。观者在近看时会注意到笔触的方向与速度；退后一步，色块又会在视网膜上“融合”，形成柔和的整体。
+
+这种处理方式让作品在写实与抽象之间保持张力：它并不追求对物体轮廓的精确描摹，而是强调“看见”的过程本身——光如何落下、颜色如何转变、以及情绪如何被唤起。
+""",
+        artistIntroduction: "",
+        narrationLanguage: ContentLanguage.zh,
+        userImage: nil,
+        confidence: 0.9
+    )
+}
+
+#Preview("iPhone SE (3rd gen)") {
+    PlaybackView(
+        artworkInfo: ArtworkInfo(
+            title: "悬崖上的散步（超长标题用于测试换行与裁切问题：确保不会被屏幕边缘裁掉）",
+            artist: "克劳德·莫奈",
+            year: "1882",
+            style: "印象派",
+            sources: []
+        ),
+        narration: """
+这是一段较长的中文讲解，用来验证在小屏幕设备上文字不会被裁切，同时能够正常换行显示。这里会包含多段内容，并且每段都有一定长度，以模拟真实生成讲解的显示效果。
+
+第二段继续增加长度：当内容变多时，滚动区域必须能够在 header 与 player 之间顺畅滚动，且不会出现左右贴边或字符被截断的问题。
+
+第三段：如果你把系统字体调大（动态字体），也应该仍然能够看到完整内容，而不是被固定宽度的 frame 导致裁切。
+""",
+        artistIntroduction: "（可选）艺术家介绍也应当在同一滚动区域里正常换行显示。",
+        narrationLanguage: ContentLanguage.zh,
         userImage: nil,
         confidence: 0.9
     )

@@ -10,6 +10,7 @@ import SwiftUI
 struct DatabaseTestView: View {
     @State private var backendURL: String = ""
     @State private var backendKey: String = ""
+    @State private var openAIKey: String = ""
     @State private var testResults: [TestResult] = []
     @State private var isTesting = false
     @State private var artworkCount: Int = 0
@@ -18,17 +19,45 @@ struct DatabaseTestView: View {
     var body: some View {
         NavigationView {
             List {
-                // Configuration Section
-                Section("后端配置") {
-                    TextField("Backend URL", text: $backendURL)
-                        .textContentType(.URL)
-                        .autocapitalization(.none)
-                    
-                    SecureField("Backend API Key", text: $backendKey)
+                // OpenAI Configuration Section
+                Section("dbtest.section.openai") {
+                    SecureField("dbtest.openai.key.placeholder", text: $openAIKey)
                         .textContentType(.password)
                         .autocapitalization(.none)
                     
-                    Button("保存配置") {
+                    Button("dbtest.openai.key.save") {
+                        saveOpenAIKey()
+                    }
+                    .disabled(openAIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    
+                    if AppConfig.isConfigured {
+                        HStack {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                            Text("dbtest.openai.configured")
+                                .foregroundColor(.green)
+                        }
+                    } else {
+                        HStack {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.red)
+                            Text("dbtest.openai.missing")
+                                .foregroundColor(.red)
+                        }
+                    }
+                }
+                
+                // Configuration Section
+                Section("dbtest.section.backend") {
+                    TextField("dbtest.backend.url.placeholder", text: $backendURL)
+                        .textContentType(.URL)
+                        .autocapitalization(.none)
+                    
+                    SecureField("dbtest.backend.key.placeholder", text: $backendKey)
+                        .textContentType(.password)
+                        .autocapitalization(.none)
+                    
+                    Button("dbtest.backend.save") {
                         saveConfiguration()
                     }
                     
@@ -36,22 +65,22 @@ struct DatabaseTestView: View {
                         HStack {
                             Image(systemName: "checkmark.circle.fill")
                                 .foregroundColor(.green)
-                            Text("后端已配置")
+                            Text("dbtest.backend.configured")
                                 .foregroundColor(.green)
                         }
                     } else {
                         HStack {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundColor(.red)
-                            Text("后端未配置")
+                            Text("dbtest.backend.missing")
                                 .foregroundColor(.red)
                         }
                     }
                 }
                 
                 // Test Section
-                Section("测试功能") {
-                    Button("运行完整QA测试") {
+                Section("dbtest.section.actions") {
+                    Button("dbtest.action.run_full_qa") {
                         runQATests()
                     }
                     .disabled(isTesting || !AppConfig.isBackendConfigured)
@@ -59,27 +88,27 @@ struct DatabaseTestView: View {
                     
                     Divider()
                     
-                    Button("测试连接") {
+                    Button("dbtest.action.test_connection") {
                         testConnection()
                     }
                     .disabled(isTesting || !AppConfig.isBackendConfigured)
                     
-                    Button("测试查询作品") {
+                    Button("dbtest.action.test_query_artwork") {
                         testArtworkQuery()
                     }
                     .disabled(isTesting || !AppConfig.isBackendConfigured)
                     
-                    Button("测试保存作品") {
+                    Button("dbtest.action.test_save_artwork") {
                         testSaveArtwork()
                     }
                     .disabled(isTesting || !AppConfig.isBackendConfigured)
                     
-                    Button("测试查询艺术家") {
+                    Button("dbtest.action.test_query_artist") {
                         testArtistQuery()
                     }
                     .disabled(isTesting || !AppConfig.isBackendConfigured)
                     
-                    Button("获取统计信息") {
+                    Button("dbtest.action.get_stats") {
                         getStatistics()
                     }
                     .disabled(isTesting || !AppConfig.isBackendConfigured)
@@ -87,22 +116,22 @@ struct DatabaseTestView: View {
                     if isTesting {
                         HStack {
                             ProgressView()
-                            Text("测试中...")
+                            Text("dbtest.testing")
                         }
                     }
                 }
                 
                 // Statistics Section
-                Section("统计信息") {
+                Section("dbtest.section.stats") {
                     HStack {
-                        Text("作品数量")
+                        Text("dbtest.count.artworks")
                         Spacer()
                         Text("\(artworkCount)")
                             .foregroundColor(.secondary)
                     }
                     
                     HStack {
-                        Text("艺术家数量")
+                        Text("dbtest.count.artists")
                         Spacer()
                         Text("\(artistCount)")
                             .foregroundColor(.secondary)
@@ -110,7 +139,7 @@ struct DatabaseTestView: View {
                 }
                 
                 // Results Section
-                Section("测试结果") {
+                Section("dbtest.section.results") {
                     ForEach(testResults) { result in
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
@@ -136,7 +165,7 @@ struct DatabaseTestView: View {
                     }
                 }
             }
-            .navigationTitle("数据库测试")
+            .navigationTitle("dbtest.title")
             .onAppear {
                 loadConfiguration()
                 if AppConfig.isBackendConfigured {
@@ -154,9 +183,27 @@ struct DatabaseTestView: View {
             AppConfig.setBackendAPIKey(backendKey)
         }
         testResults.append(TestResult(
-            testName: "配置保存",
+            testName: String(localized: "dbtest.result.config_save.name"),
             success: true,
-            message: "配置已保存"
+            message: String(localized: "dbtest.result.config_save.message")
+        ))
+    }
+
+    private func saveOpenAIKey() {
+        let trimmed = openAIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        
+        // Store locally (Keychain preferred, UserDefaults for backward compatibility).
+        // We do NOT delete any existing keys.
+        AppConfig.setAPIKey(trimmed)
+        
+        // Clear input field to avoid showing secrets on screen.
+        openAIKey = ""
+        
+        testResults.append(TestResult(
+            testName: String(localized: "dbtest.result.openai_key_save.name"),
+            success: true,
+            message: String(localized: "dbtest.result.openai_key_save.message")
         ))
     }
     
@@ -168,9 +215,9 @@ struct DatabaseTestView: View {
     private func testConnection() {
         isTesting = true
         testResults.append(TestResult(
-            testName: "连接测试",
+            testName: String(localized: "dbtest.result.connection.name"),
             success: false,
-            message: "测试中..."
+            message: String(localized: "dbtest.testing")
         ))
         
         Task {
@@ -186,18 +233,18 @@ struct DatabaseTestView: View {
                     let _ = try await backendAPI.findArtwork(identifier: identifier)
                     await MainActor.run {
                         testResults[testResults.count - 1] = TestResult(
-                            testName: "连接测试",
+                            testName: String(localized: "dbtest.result.connection.name"),
                             success: true,
-                            message: "连接成功"
+                            message: String(localized: "dbtest.result.connection.success")
                         )
                         isTesting = false
                     }
                 } catch {
                     await MainActor.run {
                         testResults[testResults.count - 1] = TestResult(
-                            testName: "连接测试",
+                            testName: String(localized: "dbtest.result.connection.name"),
                             success: false,
-                            message: "连接失败",
+                            message: String(localized: "dbtest.result.connection.failure"),
                             error: error.localizedDescription
                         )
                         isTesting = false
@@ -206,9 +253,9 @@ struct DatabaseTestView: View {
             } else {
                 await MainActor.run {
                     testResults[testResults.count - 1] = TestResult(
-                        testName: "连接测试",
+                        testName: String(localized: "dbtest.result.connection.name"),
                         success: false,
-                        message: "后端未配置"
+                        message: String(localized: "dbtest.result.connection.backend_missing")
                     )
                     isTesting = false
                 }
@@ -219,9 +266,9 @@ struct DatabaseTestView: View {
     private func testArtworkQuery() {
         isTesting = true
         testResults.append(TestResult(
-            testName: "查询作品测试",
+            testName: String(localized: "dbtest.result.artwork_query.name"),
             success: false,
-            message: "测试中..."
+            message: String(localized: "dbtest.testing")
         ))
         
         Task {
@@ -234,18 +281,18 @@ struct DatabaseTestView: View {
                 if let artwork = try await BackendAPIService.shared.findArtwork(identifier: identifier) {
                     await MainActor.run {
                         testResults[testResults.count - 1] = TestResult(
-                            testName: "查询作品测试",
+                            testName: String(localized: "dbtest.result.artwork_query.name"),
                             success: true,
-                            message: "找到作品: \(artwork.title) by \(artwork.artist)"
+                            message: String(format: String(localized: "dbtest.result.artwork_query.found_fmt"), artwork.title, artwork.artist)
                         )
                         isTesting = false
                     }
                 } else {
                     await MainActor.run {
                         testResults[testResults.count - 1] = TestResult(
-                            testName: "查询作品测试",
+                            testName: String(localized: "dbtest.result.artwork_query.name"),
                             success: true,
-                            message: "未找到作品（这是正常的，如果数据库中还没有该作品）"
+                            message: String(localized: "dbtest.result.artwork_query.not_found")
                         )
                         isTesting = false
                     }
@@ -253,9 +300,9 @@ struct DatabaseTestView: View {
             } catch {
                 await MainActor.run {
                     testResults[testResults.count - 1] = TestResult(
-                        testName: "查询作品测试",
+                        testName: String(localized: "dbtest.result.artwork_query.name"),
                         success: false,
-                        message: "查询失败",
+                        message: String(localized: "dbtest.result.artwork_query.failed"),
                         error: error.localizedDescription
                     )
                     isTesting = false
@@ -267,9 +314,9 @@ struct DatabaseTestView: View {
     private func testSaveArtwork() {
         isTesting = true
         testResults.append(TestResult(
-            testName: "保存作品测试",
+            testName: String(localized: "dbtest.result.artwork_save.name"),
             success: false,
-            message: "测试中..."
+            message: String(localized: "dbtest.testing")
         ))
         
         Task {
@@ -300,9 +347,9 @@ struct DatabaseTestView: View {
                 try await BackendAPIService.shared.saveArtwork(backendArtwork)
                 await MainActor.run {
                     testResults[testResults.count - 1] = TestResult(
-                        testName: "保存作品测试",
+                        testName: String(localized: "dbtest.result.artwork_save.name"),
                         success: true,
-                        message: "作品保存成功"
+                        message: String(localized: "dbtest.result.artwork_save.success")
                     )
                     isTesting = false
                     getStatistics()
@@ -310,9 +357,9 @@ struct DatabaseTestView: View {
             } catch {
                 await MainActor.run {
                     testResults[testResults.count - 1] = TestResult(
-                        testName: "保存作品测试",
+                        testName: String(localized: "dbtest.result.artwork_save.name"),
                         success: false,
-                        message: "保存失败",
+                        message: String(localized: "dbtest.result.artwork_save.failed"),
                         error: error.localizedDescription
                     )
                     isTesting = false
@@ -324,9 +371,9 @@ struct DatabaseTestView: View {
     private func testArtistQuery() {
         isTesting = true
         testResults.append(TestResult(
-            testName: "查询艺术家测试",
+            testName: String(localized: "dbtest.result.artist_query.name"),
             success: false,
-            message: "测试中..."
+            message: String(localized: "dbtest.testing")
         ))
         
         Task {
@@ -334,18 +381,18 @@ struct DatabaseTestView: View {
                 if let artist = try await BackendAPIService.shared.findArtistIntroduction(artist: "测试艺术家") {
                     await MainActor.run {
                         testResults[testResults.count - 1] = TestResult(
-                            testName: "查询艺术家测试",
+                            testName: String(localized: "dbtest.result.artist_query.name"),
                             success: true,
-                            message: "找到艺术家: \(artist.name)"
+                            message: String(format: String(localized: "dbtest.result.artist_query.found_fmt"), artist.name)
                         )
                         isTesting = false
                     }
                 } else {
                     await MainActor.run {
                         testResults[testResults.count - 1] = TestResult(
-                            testName: "查询艺术家测试",
+                            testName: String(localized: "dbtest.result.artist_query.name"),
                             success: true,
-                            message: "未找到艺术家（这是正常的，如果数据库中还没有该艺术家）"
+                            message: String(localized: "dbtest.result.artist_query.not_found")
                         )
                         isTesting = false
                     }
@@ -353,9 +400,9 @@ struct DatabaseTestView: View {
             } catch {
                 await MainActor.run {
                     testResults[testResults.count - 1] = TestResult(
-                        testName: "查询艺术家测试",
+                        testName: String(localized: "dbtest.result.artist_query.name"),
                         success: false,
-                        message: "查询失败",
+                        message: String(localized: "dbtest.result.artist_query.failed"),
                         error: error.localizedDescription
                     )
                     isTesting = false
@@ -395,9 +442,9 @@ struct DatabaseTestView: View {
                 print("❌ Failed to get statistics: \(error.localizedDescription)")
                 await MainActor.run {
                     testResults.append(TestResult(
-                        testName: "获取统计信息",
+                        testName: String(localized: "dbtest.result.get_stats.name"),
                         success: false,
-                        message: "获取失败",
+                        message: String(localized: "dbtest.result.get_stats.failed"),
                         error: error.localizedDescription
                     ))
                 }
@@ -485,9 +532,9 @@ struct DatabaseTestView: View {
         testResults.removeAll()
         
         testResults.append(TestResult(
-            testName: "QA测试",
+            testName: String(localized: "dbtest.result.qa_test.name"),
             success: false,
-            message: "正在运行QA测试..."
+            message: String(localized: "dbtest.result.qa_test.running")
         ))
         
         Task {
@@ -514,9 +561,9 @@ struct DatabaseTestView: View {
                 let passedCount = qaResults.filter { $0.passed }.count
                 let totalCount = qaResults.count
                 testResults.append(TestResult(
-                    testName: "QA测试总结",
+                    testName: String(localized: "dbtest.result.qa_test.summary"),
                     success: passedCount == totalCount,
-                    message: "通过: \(passedCount)/\(totalCount)"
+                    message: String(format: String(localized: "dbtest.result.qa_test.summary_fmt"), passedCount, totalCount)
                 ))
                 
                 isTesting = false
